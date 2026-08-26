@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 import traceback
@@ -274,6 +275,7 @@ def collect_local(spark: Dict[str, Any]) -> Dict[str, Any]:
     env["DGX_SMD_PROBES_JSON"] = json.dumps(probes)
     # Execute the shared script body via python -c for parity with remote
     try:
+        # Prefer argv form (no shell) so probes JSON never needs quoting.
         result = subprocess.run(
             ["python3", "-c", COLLECTOR_SCRIPT],
             capture_output=True,
@@ -316,8 +318,12 @@ def collect_remote(spark: Dict[str, Any]) -> Dict[str, Any]:
     if key:
         cmd.extend(["-i", key])
     cmd.append(f"{user}@{host}")
-    # Pass probes via env on remote
-    remote = f"DGX_SMD_PROBES_JSON={json.dumps(probes)} python3 -c {subprocess.list2cmdline([COLLECTOR_SCRIPT])}"
+    # Pass probes via env on remote — must be shell-quoted for bash over SSH.
+    # Avoid subprocess.list2cmdline (Windows-oriented) for remote Unix shells.
+    remote = (
+        f"DGX_SMD_PROBES_JSON={shlex.quote(json.dumps(probes))} "
+        f"python3 -c {shlex.quote(COLLECTOR_SCRIPT)}"
+    )
     cmd.append(remote)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
