@@ -6,9 +6,12 @@ See what’s loaded, what’s on disk, and what still fits — before you OOM th
 > Not a fleet Grafana clone. Not a model launcher.  
 > The question this answers: *“What is eating my ~128 GB right now, and what can I still load?”*
 
-![license](https://img.shields.io/badge/license-MIT-green)
-![python](https://img.shields.io/badge/python-3.9%2B-blue)
-![platform](https://img.shields.io/badge/platform-DGX%20Spark%20%7C%20GB10-76B900)
+[![license](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
+[![platform](https://img.shields.io/badge/platform-DGX%20Spark%20%7C%20GB10-76B900)](#)
+[![GitHub release](https://img.shields.io/github/v/release/hectorTSH/dgx-spark-memory-dashboard)](https://github.com/hectorTSH/dgx-spark-memory-dashboard/releases)
+
+![DGX Spark Memory Dashboard screenshot](docs/screenshot.png)
 
 ## Why this exists
 
@@ -65,6 +68,28 @@ dgx-spark-memory-dashboard --demo
 ```
 
 Zero required dependencies. Optional: `PyYAML` for richer config parsing (a built-in subset parser works without it), `rumps` for the macOS menu bar.
+
+## Never drop connection (macOS)
+
+Two layers keep the UI live 24/7:
+
+1. **Server KeepAlive + watchdog (LaunchAgents)** — survives reboot, crashes, and hung-but-listening processes  
+2. **Browser auto-reconnect** — exponential backoff, resumes on focus/online, keeps last good map during blips  
+
+```bash
+# after config.yaml exists:
+./scripts/install-launchagent.sh
+# → KeepAlive service on :7474 + healthcheck every 30s
+# logs: ~/Library/Logs/spark-memory-dashboard/
+```
+
+Uninstall:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.hamallar.spark-memory-dashboard" 2>/dev/null || true
+launchctl bootout "gui/$(id -u)/com.hamallar.spark-memory-dashboard-watchdog" 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.hamallar.spark-memory-dashboard*.plist
+```
 
 ## Architecture
 
@@ -141,6 +166,12 @@ Units default to **GiB**; the UI can toggle GiB/GB.
 - Default bind is `127.0.0.1`. Binding `0.0.0.0` without a token prints a warning — anyone on the network can read model inventory and host stats.
 - SSH uses `BatchMode` + your key. Keys never leave your machine; only collector stdout JSON is pulled.
 - No write/control actions in this project.
+
+## Support / hire
+
+- **Issues & ideas:** [GitHub Issues](https://github.com/hectorTSH/dgx-spark-memory-dashboard/issues)
+- **Sponsors:** [github.com/sponsors/hectorTSH](https://github.com/sponsors/hectorTSH) (if enabled)
+- **Need Spark ops help?** Multi-node memory layout, vLLM/Ollama coexistence, Tailscale phone dashboards — open an issue with `[consulting]` or email via GitHub profile.
 
 ## License
 
