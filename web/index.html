@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#07090f">
+<title>DGX Spark · Memory Dashboard</title>
+<style>
+:root{
+  --bg:#07090f;--panel:#0d1117;--border:#1e2733;
+  --acc1:#00c8ff;--acc2:#7c3aed;--acc3:#10b981;--acc4:#f59e0b;
+  --danger:#ef4444;--text:#e2e8f0;--dim:#64748b;
+  --moe:#a78bfa;--dense:#34d399;--system:#475569;--free:#121821;
+  --hf:#ff6f00;--ollama:#00c8ff;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{
+  background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'SF Mono','Fira Code',ui-monospace,monospace;
+  font-size:13px;height:100%;max-height:100%;overflow:hidden;-webkit-text-size-adjust:100%;
+}
+body{display:flex;flex-direction:column}
+header{
+  display:flex;align-items:center;gap:10px;padding:8px 14px;
+  border-bottom:1px solid var(--border);background:#0a0d14;z-index:50;flex-wrap:wrap;flex:0 0 auto;
+}
+.logo{font-size:15px;font-weight:700;letter-spacing:.04em;color:var(--acc1)}
+.badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.badge-spark{background:#1a1a40;color:var(--acc1);border:1px solid #1e3a5f}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block;margin-right:6px}
+.status-dot.online{background:var(--acc3);box-shadow:0 0 6px var(--acc3)}
+.status-dot.error{background:var(--danger)}
+#refresh-btn,#units-btn{cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:6px;padding:5px 12px;font-size:12px;font-family:inherit;min-height:32px}
+#refresh-btn{margin-left:auto}
+#refresh-btn:hover,#units-btn:hover{border-color:var(--acc1);color:var(--acc1)}
+#last-updated{font-size:11px;color:var(--dim)}
+#spark-tabs{display:flex;gap:6px;flex-wrap:wrap;padding:6px 14px;border-bottom:1px solid var(--border);background:#080b10;flex:0 0 auto}
+.spark-tab{
+  border:1px solid var(--border);background:#0d1117;color:var(--dim);border-radius:8px;
+  padding:6px 12px;font:inherit;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;
+}
+.spark-tab.active{border-color:var(--acc1);color:var(--text);background:rgba(0,200,255,.06)}
+.spark-tab .mini{font-size:10px;color:var(--dim)}
+.spark-tab .pill{font-size:10px;padding:1px 6px;border-radius:999px;background:#122033;color:var(--acc1)}
+main{
+  display:grid;grid-template-columns:minmax(260px,1fr) minmax(0,2fr);
+  gap:0;flex:1 1 auto;min-height:0;overflow:hidden;height:100%;
+}
+#sidebar{
+  border-right:1px solid var(--border);overflow-x:hidden;overflow-y:auto;
+  background:var(--panel);display:flex;flex-direction:column;min-height:0;
+  -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+}
+.section-head{
+  padding:8px 12px;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--dim);border-bottom:1px solid var(--border);background:#080b10;position:sticky;top:0;z-index:10;
+}
+.model-row{display:grid;grid-template-columns:1fr auto;align-items:start;padding:8px 12px;border-bottom:1px solid rgba(30,39,51,.5);gap:4px}
+.model-row.hot{background:rgba(0,200,255,.04);border-left:2px solid var(--acc1)}
+.model-row.fits{background:rgba(16,185,129,.05)}
+.model-row.tight{background:rgba(245,158,11,.05)}
+.model-row.nofit{opacity:.55}
+.model-name{font-size:12px;font-weight:600;color:var(--text);word-break:break-word}
+.model-meta{font-size:10px;color:var(--dim);margin-top:2px;display:flex;flex-wrap:wrap;gap:5px}
+.tag{padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
+.tag-moe{background:#2d1b69;color:var(--moe);border:1px solid #3d2a7a}
+.tag-dense{background:#064e3b;color:var(--dense);border:1px solid #0d6348}
+.tag-ollama{background:#0c2233;color:var(--ollama);border:1px solid #0e3654}
+.tag-hf{background:#2c1600;color:var(--hf);border:1px solid #3d2200}
+.tag-hot{background:#0c2233;color:var(--acc1)}
+.tag-vllm{background:#1e0a3c;color:#c4b5fd;border:1px solid #3b1f6d}
+.tag-llama{background:#1a2a12;color:#a3e635;border:1px solid #365314}
+.tag-sglang{background:#2a1030;color:#f0abfc;border:1px solid #86198f}
+.tag-fit{background:#064e3b;color:var(--acc3);border:1px solid #0d6348}
+.tag-tight{background:#3b2a0a;color:var(--acc4);border:1px solid #5a3f10}
+.tag-nofit{background:#3b1212;color:#fca5a5;border:1px solid #7f1d1d}
+.model-size-col{text-align:right;font-size:11px;color:var(--dim);white-space:nowrap}
+.model-size-col .disk-size{font-weight:700;font-size:13px;color:var(--text)}
+#mem-bar-wrap{padding:10px 12px;border-bottom:1px solid var(--border);background:#080b10;flex:0 0 auto}
+.bar-label{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-bottom:4px}
+.bar-track{height:8px;border-radius:6px;background:#1a2332;overflow:hidden}
+.bar-fill{height:100%;border-radius:6px;transition:width .8s ease;background:linear-gradient(90deg,var(--acc2),var(--acc1))}
+.bar-fill.disk{background:linear-gradient(90deg,#065f46,var(--acc3))}
+#viz-panel{position:relative;overflow:hidden;background:var(--bg);display:flex;flex-direction:column;min-height:0;min-width:0;height:100%}
+#capacity-head{
+  flex:0 0 auto;padding:10px 14px 8px;border-bottom:1px solid var(--border);background:#0a0d14;
+  display:grid;grid-template-columns:1fr auto;gap:10px 16px;align-items:start;
+}
+#active-model-badge{font-size:clamp(16px,2.2vw,22px);font-weight:700;color:var(--acc1);text-shadow:0 0 20px rgba(0,200,255,.5);line-height:1.15}
+#active-model-sub{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.35}
+.viz-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--dim)}
+#legend{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:10px;color:var(--dim);margin-top:6px}
+.legend-item{display:inline-flex;align-items:center;gap:5px}
+.swatch{width:9px;height:9px;border-radius:2px;display:inline-block;border:1px solid transparent}
+#vram-display{font-size:clamp(22px,3vw,30px);font-weight:700;color:var(--acc3);line-height:1;text-align:right}
+#room-note{
+  grid-column:1 / -1;font-size:11px;color:var(--text);
+  background:rgba(16,185,129,.06);border:1px solid rgba(16,185,129,.2);
+  border-radius:8px;padding:7px 10px;line-height:1.35;
+}
+#room-note strong{color:var(--acc3)}
+#canvas-wrap{flex:1 1 auto;position:relative;min-height:0;min-width:0;background:#0b0f16}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#gpu-strip{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:8px 14px;border-top:1px solid var(--border);background:#0a0d14}
+.meter{display:flex;flex-direction:column;gap:2px;min-width:0}
+.meter-title{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+.meter-val{font-size:clamp(14px,1.8vw,18px);font-weight:700;color:var(--text);line-height:1.1}
+.meter-sub{font-size:9px;color:var(--dim)}
+#swap-log{flex:0 0 auto;border-top:1px solid var(--border);padding:6px 14px;max-height:52px;overflow:hidden;background:#080b10}
+.swap-entry{font-size:11px;display:flex;gap:8px;margin-bottom:2px;align-items:center;flex-wrap:nowrap;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.swap-entry .ts{color:var(--dim);min-width:52px;flex:0 0 auto}
+.swap-entry .ev-out{color:var(--danger)}
+.swap-entry .ev-in{color:var(--acc3)}
+.swap-entry .ev-neutral{color:var(--dim)}
+.swap-entry .arrow{color:var(--acc4)}
+#no-proxy{display:none;position:absolute;inset:0;background:rgba(7,9,15,.94);z-index:99;align-items:center;justify-content:center;flex-direction:column;gap:12px;text-align:center;padding:24px}
+#no-proxy.show{display:flex}
+#no-proxy h2{color:var(--acc1);font-size:18px}
+#no-proxy code{background:#141c28;padding:8px 14px;border-radius:6px;font-size:12px;color:var(--text);border:1px solid var(--border);display:inline-block;word-break:break-all}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-thumb{background:#1e2733;border-radius:2px}
+@media (max-width:900px){
+  html,body{height:auto;max-height:none;overflow:auto}
+  body{display:block}
+  main{grid-template-columns:1fr;height:auto;overflow:visible}
+  #sidebar{border-right:none;border-top:1px solid var(--border);max-height:45vh;order:2}
+  #viz-panel{order:1;height:min(58vh,560px);min-height:420px}
+  #gpu-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
+  header{padding-top:max(8px, env(safe-area-inset-top))}
+}
+@media (max-width:520px){
+  .logo{font-size:14px}
+  #refresh-btn{width:100%;margin-left:0}
+  header{gap:8px}
+}
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">⚡ DGX SPARK</span>
+  <span class="badge badge-spark" id="product-badge">memory map</span>
+  <span id="conn-indicator"><span class="status-dot" id="status-dot"></span><span id="status-text">connecting…</span></span>
+  <span id="last-updated"></span>
+  <button id="units-btn" title="Toggle GiB / GB">GiB</button>
+  <button id="refresh-btn">↺ refresh</button>
+</header>
+<div id="spark-tabs"></div>
+<main>
+  <div id="sidebar">
+    <div id="mem-bar-wrap">
+      <div class="bar-label">
+        <span>RAM  <span id="mem-used-label">—</span> / <span id="mem-total-label">—</span></span>
+        <span id="mem-pct">—</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="mem-bar" style="width:0%"></div></div>
+      <div style="margin-top:8px" class="bar-label">
+        <span>SSD  <span id="disk-used-label">—</span> / <span id="disk-total-label">—</span></span>
+        <span id="disk-pct">—</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill disk" id="disk-bar" style="width:0%"></div></div>
+    </div>
+    <div class="section-head">🔴 HOT IN RAM</div>
+    <div id="list-hot"></div>
+    <div class="section-head">📦 CAN I LOAD NEXT?</div>
+    <div id="list-fit"></div>
+    <div class="section-head">📦 ON SSD — OLLAMA (<span id="ollama-count">0</span>)</div>
+    <div id="list-ollama"></div>
+    <div class="section-head">🤗 ON SSD — HUGGINGFACE (<span id="hf-count">0</span>)</div>
+    <div id="list-hf"></div>
+    <div class="section-head">⚙️ ENGINES / DOCKER</div>
+    <div id="list-engines"></div>
+  </div>
+  <div id="viz-panel">
+    <div id="no-proxy">
+      <h2>📡 Server not reachable</h2>
+      <p style="color:var(--dim);max-width:420px">Start the dashboard server, then open it over HTTP (not as a bare file).</p>
+      <code id="proxy-help">python3 scripts/run.py --demo</code>
+      <p style="color:var(--dim);font-size:12px;margin-top:6px">Then open <span id="proxy-url-hint">http://127.0.0.1:7474/</span></p>
+    </div>
+    <div id="capacity-head">
+      <div>
+        <div class="viz-label">detected active model</div>
+        <div id="active-model-badge">undetected</div>
+        <div id="active-model-sub"></div>
+        <div id="legend">
+          <span class="legend-item"><span class="swatch" style="background:#34d399"></span>Dense</span>
+          <span class="legend-item"><span class="swatch" style="background:#a78bfa"></span>MoE</span>
+          <span class="legend-item"><span class="swatch" style="background:#64748b"></span>System / other</span>
+          <span class="legend-item"><span class="swatch" style="background:#1a2332;border-color:#334155"></span>Free (~1 unit)</span>
+        </div>
+      </div>
+      <div>
+        <div class="viz-label" style="text-align:right">unified memory free</div>
+        <div id="vram-display">—</div>
+      </div>
+      <div id="room-note">Waiting for first poll…</div>
+    </div>
+    <div id="canvas-wrap"><canvas id="c"></canvas></div>
+    <div id="gpu-strip">
+      <div class="meter"><div class="meter-title">RAM used</div><div class="meter-val" id="m-ram">—</div><div class="meter-sub">of unified memory</div></div>
+      <div class="meter"><div class="meter-title">SSD used</div><div class="meter-val" id="m-disk">—</div><div class="meter-sub">of NVMe</div></div>
+      <div class="meter"><div class="meter-title">GPU util</div><div class="meter-val" id="m-gpu">—</div><div class="meter-sub" id="m-gpu-sub">temp / power</div></div>
+      <div class="meter"><div class="meter-title">models on SSD</div><div class="meter-val" id="m-count">—</div><div class="meter-sub">ollama + hf</div></div>
+    </div>
+    <div id="swap-log"><div class="swap-entry"><span class="ts">--:--:--</span><span class="ev-neutral">waiting for first poll…</span></div></div>
+  </div>
+</main>
+<script>
+const MODEL_META = {
+  families: {
+    qwen35moe:{arch:"MoE",active:"10B"}, qwen3next:{arch:"MoE",active:"~3B"}, qwen3moe:{arch:"MoE",active:"~4B"},
+    nemotron_h_moe:{arch:"MoE",active:"varies"}, glm4moelite:{arch:"MoE",active:"~3B"},
+    gemma4:{arch:"Dense"}, qwen35:{arch:"Dense"}, gptoss:{arch:"MoE",active:"5.1B"},
+  },
+  names: {
+    "gpt-oss:120b":{label:"GPT-OSS 120B",arch:"MoE",active:"5.1B"},
+    "qwen3.5:122b-a10b":{label:"Qwen3.5 122B",arch:"MoE",active:"10B"},
+    "qwen3-next:80b":{label:"Qwen3-Next 80B",arch:"MoE",active:"~3B"},
+    "qwen3-coder:30b":{label:"Qwen3-Coder 30B",arch:"MoE",active:"~4B"},
+    "glm-4.7-flash:latest":{label:"GLM-4.7 Flash",arch:"MoE",active:"~3B"},
+    "nemotron-3-super:120b":{label:"Nemotron-3-Super 120B",arch:"MoE",active:"12.4B"},
+    "nemotron-3-nano:latest":{label:"Nemotron-3 Nano",arch:"MoE"},
+    "nemotron-3.5-lightning:latest":{label:"Nemotron-3.5 Lightning",arch:"MoE"},
+    "smtek/Qwen3.8-27B:latest":{label:"Qwen3.8-27B (smtek)",arch:"Dense"},
+    "gemma4:31b":{label:"Gemma4 31B",arch:"Dense"},
+    "gemma4:12b":{label:"Gemma4 12B",arch:"Dense"},
+    "gemma4:e4b":{label:"Gemma4 E4B",arch:"Dense"},
+    "gemma4:e2b":{label:"Gemma4 E2B",arch:"Dense"},
+    "gemma4:26b-a4b-it-q8_0":{label:"Gemma4 26B MoE",arch:"MoE",active:"4B"},
+    "qwen3.6:35b-a3b-q8_0":{label:"Qwen3.6 35B",arch:"MoE",active:"3B"},
+    "qwen3.5:4b":{label:"Qwen3.5 4B",arch:"Dense"},
+    "mmangkad/Qwen3.6-27B-NVFP4":{label:"Qwen3.6-27B NVFP4",arch:"Dense",source:"hf-vllm"},
+    "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8":{label:"Qwen3-VL 30B MoE FP8",arch:"MoE",active:"3B",source:"hf-vllm"},
+  }
+};
+function modelMeta(name, details){
+  const nm = MODEL_META.names[name] || {};
+  const fam = MODEL_META.families[(details||{}).family] || {};
+  return { arch: nm.arch || fam.arch || "Dense", active: nm.active || fam.active || null, label: nm.label || name };
+}
+const params = new URLSearchParams(location.search);
+const API_BASE = (params.get("api") || (location.protocol.startsWith("http") ? location.origin : "http://127.0.0.1:7474")).replace(/\/$/,"");
+const TOKEN = params.get("token") || localStorage.getItem("dgx_smd_token") || "";
+if(params.get("token")) localStorage.setItem("dgx_smd_token", params.get("token"));
+document.getElementById("proxy-help").textContent = `python3 scripts/run.py --demo   # or with config.yaml`;
+document.getElementById("proxy-url-hint").textContent = `${API_BASE}/`;
+
+let units = localStorage.getItem("dgx_smd_units") || "GiB"; // GiB | GB
+let headroomGiB = 2.0;
+let sparksMeta = [];
+let statesById = {};
+let activeId = null;
+let swapLogById = {};
+let lastHotById = {};
+let particles = [];
+let occupancy = { totalGiB:128, freeGiB:128, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
+
+function hms(){ return new Date().toTimeString().slice(0,8) }
+function bytesToGiB(b){ return (b||0)/(1<<30) }
+function bytesToGB(b){ return (b||0)/1e9 }
+function fmtMem(bytes){
+  if(units==="GB") return bytesToGB(bytes).toFixed(1)+"G";
+  return bytesToGiB(bytes).toFixed(1)+"G";
+}
+function fmtGiBnum(gib){
+  if(units==="GB") return (gib * (1<<30)/1e9).toFixed(1)+"G";
+  return gib.toFixed(1)+"G";
+}
+function authHeaders(){
+  const h = {};
+  if(TOKEN) h["Authorization"] = "Bearer "+TOKEN;
+  return h;
+}
+function setStatus(ok, msg){
+  document.getElementById("status-dot").className = "status-dot "+(ok?"online":"error");
+  document.getElementById("status-text").textContent = msg;
+}
+function currentState(){ return activeId ? statesById[activeId] : null }
+
+async function refresh(){
+  try{
+    const q = TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : "";
+    const r = await fetch(`${API_BASE}/api/sparks${q}`, { headers: authHeaders(), signal: AbortSignal.timeout(60000) });
+    if(r.status===401){ setStatus(false,"unauthorized — set ?token="); document.getElementById("no-proxy").classList.add("show"); return; }
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const data = await r.json();
+    document.getElementById("no-proxy").classList.remove("show");
+    headroomGiB = data.headroom_gib ?? headroomGiB;
+    if(data.units && !localStorage.getItem("dgx_smd_units")){ units = data.units; }
+    document.getElementById("units-btn").textContent = units;
+    sparksMeta = data.sparks || [];
+    const prev = {};
+    for(const st of Object.values(statesById)){
+      const id = st.spark_id;
+      prev[id] = {
+        ollama: new Set((st.ollama_ps?.models||[]).map(m=>m.name)),
+        engines: new Set([
+          ...((st.vllm_models?.data||[]).map(m=>m.id)),
+          ...((st.llamacpp_models?.data||[]).map(m=>m.id)),
+          ...((st.sglang_models?.data||[]).map(m=>m.id)),
+        ]),
+      };
+    }
+    statesById = {};
+    for(const st of (data.states||[])){
+      statesById[st.spark_id] = st;
+      const id = st.spark_id;
+      const curO = new Set((st.ollama_ps?.models||[]).map(m=>m.name));
+      const curE = new Set([
+        ...((st.vllm_models?.data||[]).map(m=>m.id)),
+        ...((st.llamacpp_models?.data||[]).map(m=>m.id)),
+        ...((st.sglang_models?.data||[]).map(m=>m.id)),
+      ]);
+      const p = prev[id] || {ollama:new Set(), engines:new Set()};
+      for(const n of p.ollama) if(!curO.has(n)) logSwap(id,"out",n);
+      for(const n of curO) if(!p.ollama.has(n)) logSwap(id,"in",n);
+      for(const n of p.engines) if(!curE.has(n)) logSwap(id,"out",n);
+      for(const n of curE) if(!p.engines.has(n)) logSwap(id,"in",n);
+    }
+    if(!activeId || !statesById[activeId]){
+      activeId = sparksMeta[0]?.id || Object.keys(statesById)[0] || null;
+    }
+    renderTabs();
+    applyActive();
+    const label = sparksMeta.find(s=>s.id===activeId)?.label || activeId || "—";
+    const anyErr = (data.states||[]).some(s=>s.error);
+    setStatus(!anyErr, anyErr ? "partial · "+label : "online · "+label);
+    document.getElementById("last-updated").textContent = "updated "+hms();
+  }catch(e){
+    document.getElementById("no-proxy").classList.add("show");
+    setStatus(false,"server offline");
+    occupancy = { totalGiB:128, freeGiB:128, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
+    syncBlocksFromOccupancy();
+  }
+}
+
+function renderTabs(){
+  const el = document.getElementById("spark-tabs");
+  if(!sparksMeta.length){
+    el.innerHTML = `<button class="spark-tab active"><span>no sparks configured</span><span class="mini">use --demo or config.yaml</span></button>`;
+    return;
+  }
+  el.innerHTML = sparksMeta.map(s=>{
+    const st = statesById[s.id] || {};
+    const free = st.mem ? bytesToGiB(st.mem.available||st.mem.free||0).toFixed(0)+"G free" : (st.error?"error":"…");
+    const hot = ((st.ollama_ps?.models||[]).length + (st.vllm_models?.data||[]).length);
+    return `<button class="spark-tab ${s.id===activeId?"active":""}" data-id="${s.id}">
+      <span>${s.label||s.id}</span>
+      <span class="pill">${s.mode||"?"}</span>
+      <span class="mini">${free}${hot?` · ${hot} hot`:""}</span>
+    </button>`;
+  }).join("");
+  el.querySelectorAll(".spark-tab").forEach(btn=>{
+    btn.onclick = ()=>{ activeId = btn.dataset.id; renderTabs(); applyActive(); };
+  });
+}
+
+function applyActive(){
+  const st = currentState();
+  if(!st){
+    document.getElementById("room-note").textContent = "No spark selected.";
+    return;
+  }
+  if(st.error){
+    document.getElementById("room-note").textContent = "Error: "+st.error;
+    setEmptyLists(st.error);
+    occupancy = { totalGiB:128, freeGiB:0, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
+    syncBlocksFromOccupancy();
+    return;
+  }
+  computeOccupancy(st);
+  renderSidebar(st);
+  renderMeters(st);
+  updateActiveModel(st);
+  syncBlocksFromOccupancy();
+  renderSwapLog(activeId);
+  document.getElementById("product-badge").textContent = (st.spark_label||st.spark_id||"spark") + (st.demo?" · demo":"");
+}
+
+function setEmptyLists(msg){
+  ["list-hot","list-fit","list-ollama","list-hf","list-engines"].forEach(id=>{
+    document.getElementById(id).innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">${msg||"—"}</div>`;
+  });
+}
+
+function computeOccupancy(state){
+  const mem = state.mem || {};
+  const totalGiB = bytesToGiB(mem.total || (128*(1<<30)));
+  const availGiB = bytesToGiB(mem.available || mem.free || 0);
+  const usedGiB = Math.max(0, totalGiB - availGiB);
+  const models = [];
+  for(const m of (state.ollama_ps?.models||[])){
+    const tags = (state.ollama_tags?.models||[]);
+    const t = tags.find(x=>x.name===m.name)||{};
+    const mt = modelMeta(m.name, t.details||m.details||{});
+    const gib = Math.max(0.1, bytesToGiB(m.size || t.size || 0));
+    models.push({name:m.name, label:mt.label, arch:mt.arch, gib, source:"ollama"});
+  }
+  for(const eng of ["vllm","llamacpp","sglang"]){
+    for(const m of (state[eng+"_models"]?.data||[])){
+      const mt = modelMeta(m.id||m.name,{});
+      const gib = m._size_gib || estimateNameGiB(m.id||"", mt.arch);
+      models.push({name:m.id||m.name, label:mt.label||m.id, arch:mt.arch, gib, source:eng, size_source:m._size_source});
+    }
+  }
+  const modelGiB = models.reduce((s,m)=>s+m.gib,0);
+  const systemGiB = Math.max(0, usedGiB - modelGiB);
+  occupancy = { totalGiB, freeGiB:Math.max(0,availGiB), usedGiB, systemGiB, modelGiB, models };
+}
+
+function estimateNameGiB(id, arch){
+  const n = (id||"").toLowerCase();
+  if(/122b|120b/.test(n)) return 70;
+  if(/80b/.test(n)) return 50;
+  if(/35b/.test(n)) return 28;
+  if(/30b|31b|32b/.test(n)) return 26;
+  if(/27b/.test(n)) return 24;
+  if(/26b/.test(n)) return 22;
+  return arch==="MoE"?35:25;
+}
+
+function catalogCandidates(state){
+  const hot = new Set((state.ollama_ps?.models||[]).map(m=>m.name));
+  for(const eng of ["vllm","llamacpp","sglang"]){
+    for(const m of (state[eng+"_models"]?.data||[])) hot.add(m.id||m.name);
+  }
+  const out = [];
+  for(const t of (state.ollama_tags?.models||[])){
+    const mt = modelMeta(t.name, t.details||{});
+    out.push({name:t.name, mt, need:bytesToGiB(t.size||0), hot:hot.has(t.name), source:"ollama"});
+  }
+  for(const h of (state.hf_models||[])){
+    const mt = modelMeta(h.name,{});
+    const need = h.size_gib != null ? h.size_gib : (h.size_bytes?bytesToGiB(h.size_bytes): (h.size_gb||0)*(1e9/(1<<30)));
+    out.push({name:h.name, mt, need, hot:hot.has(h.name), source:"hf"});
+  }
+  return out;
+}
+
+function renderSidebar(state){
+  const freeGiB = occupancy.freeGiB||0;
+  const tags = state.ollama_tags?.models||[];
+  const ps = state.ollama_ps?.models||[];
+  const hot = new Set(ps.map(m=>m.name));
+  const hf = state.hf_models||[];
+  const docker = state.docker||[];
+
+  const hotEl = document.getElementById("list-hot");
+  const engineHot = [
+    ...(state.vllm_models?.data||[]).map(m=>({...m, eng:"vllm"})),
+    ...(state.llamacpp_models?.data||[]).map(m=>({...m, eng:"llamacpp"})),
+    ...(state.sglang_models?.data||[]).map(m=>({...m, eng:"sglang"})),
+  ];
+  if(!ps.length && !engineHot.length){
+    hotEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">GPU/RAM empty — no models loaded</div>`;
+  } else {
+    let html = ps.map(m=>{
+      const t = tags.find(t=>t.name===m.name)||{};
+      const mt = modelMeta(m.name, t.details||m.details||{});
+      return rowHtml(m.name, mt, fmtMem(m.size||0), true, "ollama");
+    }).join("");
+    for(const m of engineHot){
+      const mt = modelMeta(m.id||m.name,{});
+      const gib = m._size_gib || estimateNameGiB(m.id||"", mt.arch);
+      const srcNote = m._size_source==="docker_stats" ? "docker" : "est";
+      html += rowHtml(m.id||m.name, mt, `~${gib.toFixed(0)}G (${srcNote})`, true, m.eng);
+    }
+    hotEl.innerHTML = html;
+  }
+
+  const candidates = catalogCandidates(state).filter(c=>!c.hot).sort((a,b)=>b.need-a.need);
+  const fits = candidates.filter(c=>c.need + headroomGiB <= freeGiB).slice(0,8);
+  const almost = candidates.filter(c=>c.need + headroomGiB > freeGiB && c.need <= freeGiB + 8).slice(0,4);
+  const hotModels = occupancy.models||[];
+  const fitEl = document.getElementById("list-fit");
+  if(!fits.length && !almost.length){
+    fitEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No catalogued model clearly fits in ${freeGiB.toFixed(1)} GiB free (with ${headroomGiB} GiB headroom).</div>`;
+  } else {
+    fitEl.innerHTML =
+      fits.map(c=>{
+        let note = `fits in free RAM`;
+        // if something is loaded, show unload hint when borderline
+        return rowHtml(c.name, c.mt, c.need.toFixed(1)+"G", false, c.source, "fits", note);
+      }).join("") +
+      almost.map(c=>{
+        const unload = hotModels.slice().sort((a,b)=>b.gib-a.gib)[0];
+        const note = unload
+          ? `tight — fits if unload ${unload.label} (~${unload.gib.toFixed(0)}G)`
+          : `needs unload/headroom`;
+        return rowHtml(c.name, c.mt, c.need.toFixed(1)+"G", false, c.source, "tight", note);
+      }).join("");
+  }
+
+  document.getElementById("ollama-count").textContent = tags.length;
+  document.getElementById("list-ollama").innerHTML = tags.map(t=>{
+    const mt = modelMeta(t.name, t.details||{});
+    const need = bytesToGiB(t.size||0);
+    const isHot = hot.has(t.name);
+    let fit="";
+    if(!isHot){
+      if(need + headroomGiB <= freeGiB) fit="fits";
+      else if(need <= freeGiB + 8) fit="tight";
+      else fit="nofit";
+    }
+    return rowHtml(t.name, mt, fmtMem(t.size||0), isHot, "ollama", fit);
+  }).join("") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No Ollama models</div>`;
+
+  document.getElementById("hf-count").textContent = hf.length;
+  document.getElementById("list-hf").innerHTML = hf.map(m=>{
+    const mt = modelMeta(m.name,{});
+    const need = m.size_gib != null ? m.size_gib : bytesToGiB(m.size_bytes||0);
+    let fit="";
+    if(need + headroomGiB <= freeGiB) fit="fits";
+    else if(need <= freeGiB + 8) fit="tight";
+    else fit="nofit";
+    const inc = m.incomplete ? ` · ${m.incomplete} incomplete` : "";
+    return rowHtml(m.name, mt, (m.size_gib!=null?m.size_gib:need).toFixed(1)+"G"+inc, false, "hf", fit);
+  }).join("") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No HF models found</div>`;
+
+  let engHtml = "";
+  for(const eng of ["vllm","llamacpp","sglang"]){
+    for(const m of (state[eng+"_models"]?.data||[])){
+      const mt = modelMeta(m.id||m.name,{});
+      const gib = m._size_gib || estimateNameGiB(m.id||"", mt.arch);
+      const kv = m._metrics?.kv_cache_usage_perc;
+      const kvNote = kv!=null ? ` · KV ${(kv*100).toFixed(0)}%` : "";
+      engHtml += `<div class="model-row hot"><div><div class="model-name">${mt.label||m.id}</div>
+        <div class="model-meta"><span class="tag tag-${eng==="vllm"?"vllm":eng==="llamacpp"?"llama":"sglang"}">${eng}</span>
+        <span class="tag ${mt.arch==="MoE"?"tag-moe":"tag-dense"}">${mt.arch}</span>
+        <span style="color:var(--acc3)">● LIVE${kvNote}</span></div></div>
+        <div class="model-size-col"><div class="disk-size">~${gib.toFixed(0)}G</div>
+        <div style="font-size:10px">${m._size_source||"est"}</div></div></div>`;
+    }
+  }
+  docker.forEach(d=>{
+    const running = (d.status||"").toLowerCase().includes("up");
+    const restarting = (d.status||"").toLowerCase().includes("restarting");
+    engHtml += `<div class="model-row" style="${running?"border-left:2px solid var(--acc3)":""}">
+      <div><div class="model-name">🐳 ${d.name}</div>
+      <div class="model-meta"><span class="tag tag-vllm">Docker</span>
+      ${running?'<span style="color:var(--acc3)">● Running</span>':''}
+      ${restarting?'<span style="color:var(--acc4)">↻ Restarting</span>':''}
+      ${!running&&!restarting?'<span style="color:var(--danger)">✕ Stopped</span>':''}</div>
+      <div style="font-size:10px;color:var(--dim);margin-top:2px">${d.status||""}${d.mem_usage?" · "+d.mem_usage:""}</div></div></div>`;
+  });
+  document.getElementById("list-engines").innerHTML = engHtml || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No engines/containers detected</div>`;
+}
+
+function rowHtml(name, mt, size, isHot, source, fitClass="", fitNote=""){
+  const archTag = mt.arch==="MoE"
+    ? `<span class="tag tag-moe">MoE${mt.active?" · "+mt.active:""}</span>`
+    : `<span class="tag tag-dense">Dense</span>`;
+  const srcTag = source==="ollama" ? `<span class="tag tag-ollama">Ollama</span>`
+    : source==="vllm" ? `<span class="tag tag-vllm">vLLM</span>`
+    : source==="llamacpp" ? `<span class="tag tag-llama">llama.cpp</span>`
+    : source==="sglang" ? `<span class="tag tag-sglang">SGLang</span>`
+    : `<span class="tag tag-hf">🤗 HF</span>`;
+  const hotTag = isHot ? `<span class="tag tag-hot">● RAM</span>` : "";
+  const fitTag = fitClass==="fits" ? `<span class="tag tag-fit">fits</span>`
+    : fitClass==="tight" ? `<span class="tag tag-tight">tight</span>`
+    : fitClass==="nofit" ? `<span class="tag tag-nofit">too big</span>` : "";
+  const note = fitNote ? `<div style="font-size:10px;color:var(--dim);margin-top:2px">${fitNote}</div>` : "";
+  return `<div class="model-row${isHot?" hot":""}${fitClass?(" "+fitClass):""}">
+    <div><div class="model-name">${mt.label}</div><div class="model-meta">${srcTag}${archTag}${hotTag}${fitTag}</div>${note}</div>
+    <div class="model-size-col"><div class="disk-size">${size}</div></div></div>`;
+}
+
+function renderMeters(state){
+  const mem = state.mem || {};
+  const disk = state.disk || {};
+  const gpu = state.gpu || {};
+  const memUsed = (mem.total||0) - (mem.available||mem.free||0);
+  const memPct = mem.total ? (memUsed/mem.total*100) : 0;
+  document.getElementById("mem-bar").style.width = memPct+"%";
+  document.getElementById("mem-used-label").textContent = fmtMem(memUsed);
+  document.getElementById("mem-total-label").textContent = fmtMem(mem.total||0);
+  document.getElementById("mem-pct").textContent = memPct.toFixed(1)+"%";
+  const dPct = disk.total ? (disk.used/disk.total*100) : 0;
+  document.getElementById("disk-bar").style.width = dPct+"%";
+  document.getElementById("disk-used-label").textContent = ((disk.used||0)/1e12).toFixed(2)+"T";
+  document.getElementById("disk-total-label").textContent = ((disk.total||0)/1e12).toFixed(1)+"T";
+  document.getElementById("disk-pct").textContent = dPct.toFixed(1)+"%";
+  const ollamaCnt = (state.ollama_tags?.models||[]).length;
+  const hfCnt = (state.hf_models||[]).length;
+  document.getElementById("m-count").textContent = (ollamaCnt+hfCnt);
+  const gpuUtil = typeof gpu.utilization_gpu==="number" ? `${gpu.utilization_gpu.toFixed(0)}%` : "—";
+  const gpuTemp = typeof gpu.temperature_gpu==="number" ? `${gpu.temperature_gpu.toFixed(0)}C` : "—";
+  const gpuPower = typeof gpu.power_draw_w==="number" ? `${gpu.power_draw_w.toFixed(0)}W` : "—";
+  document.getElementById("m-gpu").textContent = gpuUtil;
+  document.getElementById("m-gpu-sub").textContent = `${gpuTemp} / ${gpuPower}`;
+  document.getElementById("vram-display").textContent = fmtGiBnum(occupancy.freeGiB)+" free";
+  document.getElementById("m-ram").textContent = fmtGiBnum(occupancy.usedGiB);
+  document.getElementById("m-disk").textContent = ((disk.used||0)/1e12).toFixed(2)+"T";
+  const fitCount = catalogCandidates(state).filter(c=>!c.hot && c.need + headroomGiB <= occupancy.freeGiB).length;
+  document.getElementById("room-note").innerHTML =
+    occupancy.models.length===0
+      ? `<strong>${occupancy.freeGiB.toFixed(1)} GiB free</strong> · GPU empty · ${fitCount} catalogued model${fitCount===1?"":"s"} fit with ${headroomGiB}G headroom · weights ${occupancy.modelGiB.toFixed(1)}G · other ${occupancy.systemGiB.toFixed(1)}G`
+      : `<strong>${occupancy.freeGiB.toFixed(1)} GiB free</strong> · weights ${occupancy.modelGiB.toFixed(1)}G · system/other ${occupancy.systemGiB.toFixed(1)}G · ${fitCount} more can fit`;
+}
+
+function updateActiveModel(state){
+  const ps = state.ollama_ps?.models||[];
+  const engines = [
+    ...(state.vllm_models?.data||[]).map(m=>({...m, eng:"vLLM"})),
+    ...(state.llamacpp_models?.data||[]).map(m=>({...m, eng:"llama.cpp"})),
+    ...(state.sglang_models?.data||[]).map(m=>({...m, eng:"SGLang"})),
+  ];
+  const gpu = state.gpu || {};
+  const badge = document.getElementById("active-model-badge");
+  const sub = document.getElementById("active-model-sub");
+  const gpuSummary = typeof gpu.utilization_gpu==="number"
+    ? ` · GPU ${gpu.utilization_gpu.toFixed(0)}%${typeof gpu.power_draw_w==="number"?` · ${gpu.power_draw_w.toFixed(0)}W`:""}` : "";
+  if(ps.length){
+    const labels = ps.map(m=>{
+      const t=(state.ollama_tags?.models||[]).find(t=>t.name===m.name)||{};
+      const mt=modelMeta(m.name,t.details||m.details||{});
+      return `${mt.label} (${fmtMem(m.size||0)})`;
+    });
+    badge.textContent = labels[0];
+    sub.textContent = `Ollama · ${labels.join(" + ")}${gpuSummary}`;
+  } else if(engines.length){
+    const m = engines[0];
+    const mt = modelMeta(m.id||m.name,{});
+    const gib = m._size_gib || estimateNameGiB(m.id||"", mt.arch);
+    badge.textContent = mt.label || m.id;
+    sub.textContent = `${m.eng} · ${mt.arch} · ~${gib.toFixed(0)}G (${m._size_source||"est"})${gpuSummary}`;
+  } else if(typeof gpu.utilization_gpu==="number" && gpu.utilization_gpu>=10){
+    badge.textContent = "active";
+    sub.textContent = `GPU load detected${gpuSummary} · model source undetected`;
+  } else {
+    badge.textContent = "empty";
+    sub.textContent = `no hot models${gpuSummary}`;
+  }
+}
+
+function logSwap(id, dir, name){
+  if(!swapLogById[id]) swapLogById[id]=[];
+  swapLogById[id].unshift({dir,name,ts:hms()});
+  if(swapLogById[id].length>20) swapLogById[id].pop();
+  if(id===activeId){
+    renderSwapLog(id);
+    if(dir==="out") burstParticles("#ef4444");
+    if(dir==="in") burstParticles("#34d399");
+  }
+}
+function renderSwapLog(id){
+  const el = document.getElementById("swap-log");
+  const log = swapLogById[id]||[];
+  if(!log.length){ el.innerHTML = `<div class="swap-entry"><span class="ts">--:--:--</span><span class="ev-neutral">no load/unload events yet</span></div>`; return; }
+  el.innerHTML = log.slice(0,2).map(e=>{
+    if(e.dir==="out") return `<div class="swap-entry"><span class="ts">${e.ts}</span><span class="arrow">←</span><span class="ev-out">UNLOADED</span><span>${e.name}</span></div>`;
+    if(e.dir==="in") return `<div class="swap-entry"><span class="ts">${e.ts}</span><span class="arrow">→</span><span class="ev-in">LOADED</span><span>${e.name}</span></div>`;
+    return `<div class="swap-entry"><span class="ts">${e.ts}</span><span class="ev-neutral">${e.name}</span></div>`;
+  }).join("");
+}
+
+function burstParticles(color){
+  const cx=W/2, cy=H/2;
+  for(let k=0;k<24;k++) particles.push(new Particle(cx,cy,color,5));
+}
+
+const canvas=document.getElementById("c");
+const ctx=canvas.getContext("2d");
+let W=0,H=0; const BLOCKS=[]; let BLOCK_ROWS=8, BLOCK_COLS=16; const MARGIN=12;
+function resize(){
+  const wrap=document.getElementById("canvas-wrap");
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  W=Math.max(1, wrap.clientWidth||0); H=Math.max(1, wrap.clientHeight||0);
+  if(W<2||H<2) return;
+  canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr);
+  canvas.style.width=W+"px"; canvas.style.height=H+"px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  BLOCK_COLS = W<420?10:W<700?14:W<1000?16:20;
+  BLOCK_ROWS = H<220?6:H<360?8:H<520?10:12;
+  blockGrid(); syncBlocksFromOccupancy();
+}
+window.addEventListener("resize", resize);
+if(window.ResizeObserver) new ResizeObserver(()=>resize()).observe(document.getElementById("canvas-wrap"));
+function blockGrid(){
+  BLOCKS.length=0;
+  const bw=(W-MARGIN*2)/BLOCK_COLS, bh=(H-MARGIN*2)/BLOCK_ROWS;
+  for(let r=0;r<BLOCK_ROWS;r++) for(let c=0;c<BLOCK_COLS;c++){
+    BLOCKS.push({x:MARGIN+c*bw,y:MARGIN+r*bh,w:Math.max(3,bw-4),h:Math.max(3,bh-4),alpha:0.55,targetAlpha:0.55,color:"#1a2332",glow:false,kind:"free"});
+  }
+}
+class Particle{
+  constructor(x,y,color,speed){ this.x=x;this.y=y;this.color=color;this.vx=(Math.random()-.5)*speed;this.vy=(Math.random()-.5)*speed;this.life=1;this.decay=.01+Math.random()*.02;this.r=2+Math.random()*3; }
+  tick(){ this.x+=this.vx; this.y+=this.vy; this.life-=this.decay; this.vy-=0.02; }
+  draw(ctx){ ctx.save(); ctx.globalAlpha=Math.max(0,this.life); ctx.fillStyle=this.color; ctx.shadowBlur=8; ctx.shadowColor=this.color; ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+}
+function gibPerBlock(){ return (occupancy.totalGiB||128)/Math.max(1,BLOCKS.length); }
+function syncBlocksFromOccupancy(){
+  if(!BLOCKS.length) blockGrid();
+  const gpb=gibPerBlock(), n=BLOCKS.length;
+  const fills=[];
+  const models=[...(occupancy.models||[])].sort((a,b)=>b.gib-a.gib);
+  for(const m of models){
+    const count=Math.max(m.gib>0?1:0, Math.round(m.gib/gpb));
+    const color=m.arch==="MoE"?"#7c3aed":"#10b981";
+    for(let i=0;i<count;i++) fills.push({kind:"model",color});
+  }
+  const sysCount=Math.round((occupancy.systemGiB||0)/gpb);
+  for(let i=0;i<sysCount;i++) fills.push({kind:"system",color:"#64748b"});
+  const usedFills=fills.slice(0,n);
+  const emptyish=(occupancy.models||[]).length===0 && (occupancy.usedGiB||0)<6;
+  for(let i=0;i<n;i++){
+    const b=BLOCKS[i];
+    if(emptyish){
+      const residual=Math.min(n, Math.max(0, Math.round((occupancy.usedGiB||0)/gpb)));
+      if(i<residual){ b.kind="system"; b.color="#64748b"; b.glow=false; b.targetAlpha=0.75; }
+      else { b.kind="free"; b.color="#1a2332"; b.glow=false; b.targetAlpha=0.72; }
+      continue;
+    }
+    const f=usedFills[i];
+    if(!f){ b.kind="free"; b.color="#1a2332"; b.glow=false; b.targetAlpha=0.72; }
+    else if(f.kind==="model"){ b.kind="model"; b.color=f.color; b.glow=true; b.targetAlpha=0.92; }
+    else { b.kind="system"; b.color=f.color; b.glow=false; b.targetAlpha=0.8; }
+  }
+}
+function drawFrame(){
+  if(W<2||H<2){ requestAnimationFrame(drawFrame); return; }
+  ctx.clearRect(0,0,W,H); ctx.fillStyle="#0b0f16"; ctx.fillRect(0,0,W,H);
+  if(!BLOCKS.length) blockGrid();
+  BLOCKS.forEach(b=>{
+    b.alpha += (b.targetAlpha-b.alpha)*0.18;
+    ctx.save(); ctx.globalAlpha=b.alpha; ctx.fillStyle=b.color;
+    if(b.glow){ ctx.shadowBlur=10; ctx.shadowColor=b.color; }
+    const r=Math.min(5,b.w/5,b.h/5);
+    ctx.beginPath(); ctx.moveTo(b.x+r,b.y);
+    ctx.arcTo(b.x+b.w,b.y,b.x+b.w,b.y+b.h,r);
+    ctx.arcTo(b.x+b.w,b.y+b.h,b.x,b.y+b.h,r);
+    ctx.arcTo(b.x,b.y+b.h,b.x,b.y,r);
+    ctx.arcTo(b.x,b.y,b.x+b.w,b.y,r);
+    ctx.closePath(); ctx.fill();
+    if(b.kind==="free"){ ctx.globalAlpha=0.55; ctx.strokeStyle="#3b4a63"; ctx.lineWidth=1; ctx.stroke(); }
+    ctx.restore();
+  });
+  if((occupancy.models||[]).length===0 && (occupancy.usedGiB||0)<6){
+    ctx.save(); ctx.globalAlpha=0.9; ctx.fillStyle="rgba(11,15,22,0.72)";
+    const tw=Math.min(420,W*0.7), th=36, tx=(W-tw)/2, ty=(H-th)/2;
+    ctx.fillRect(tx,ty,tw,th); ctx.fillStyle="#94a3b8";
+    ctx.font="600 13px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("memory empty — outlined blocks are free capacity", W/2, H/2);
+    ctx.restore();
+  }
+  for(let i=particles.length-1;i>=0;i--){ particles[i].tick(); particles[i].draw(ctx); if(particles[i].life<=0) particles.splice(i,1); }
+  requestAnimationFrame(drawFrame);
+}
+document.getElementById("refresh-btn").onclick = ()=>refresh();
+document.getElementById("units-btn").onclick = ()=>{
+  units = units==="GiB" ? "GB" : "GiB";
+  localStorage.setItem("dgx_smd_units", units);
+  document.getElementById("units-btn").textContent = units;
+  applyActive();
+};
+requestAnimationFrame(()=>resize());
+resize(); drawFrame(); refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

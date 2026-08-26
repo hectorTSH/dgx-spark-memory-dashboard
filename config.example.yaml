@@ -1,0 +1,57 @@
+# DGX Spark Memory Dashboard — example configuration
+# Copy to config.yaml and edit. Never commit real SSH keys or tokens.
+
+server:
+  # Use 127.0.0.1 for local-only. Use 0.0.0.0 for phone/Tailscale access.
+  host: 127.0.0.1
+  port: 7474
+  poll_seconds: 8
+  # Optional shared secret. Required if you bind on a non-loopback address.
+  token: ""
+  cors_origin: "*"
+
+# Fit-advisor spare capacity (GiB) reserved when saying a model "fits"
+headroom_gib: 2.0
+
+# Display preference default for API consumers (UI can still toggle)
+units: GiB   # GiB | GB
+
+# Default probes (overridable per spark)
+probes:
+  ollama_url: http://127.0.0.1:11434
+  vllm_urls:
+    - http://127.0.0.1:8000
+  llamacpp_urls:
+    - http://127.0.0.1:8080
+  sglang_urls:
+    - http://127.0.0.1:30000
+  hf_cache: ~/.cache/huggingface/hub
+  disk_path: ~
+  hf_cache_ttl_seconds: 300
+
+sparks:
+  # --- Run the dashboard ON the Spark itself ---
+  # - id: local-spark
+  #   label: spark
+  #   mode: local
+
+  # --- Run the dashboard on a laptop, SSH to the Spark ---
+  - id: spark-1
+    label: spark-1
+    mode: remote
+    host: 100.x.x.x          # Tailscale or LAN IP
+    user: youruser
+    ssh_key: ~/.ssh/id_ed25519
+    ssh_port: 22
+    # Optional per-spark probe overrides:
+    # probes:
+    #   ollama_url: http://127.0.0.1:11434
+    #   vllm_urls: [http://127.0.0.1:8000]
+
+  # Multi-Spark: add more entries — each becomes a tab in the UI
+  # - id: spark-2
+  #   label: spark-2
+  #   mode: remote
+  #   host: 100.y.y.y
+  #   user: youruser
+  #   ssh_key: ~/.ssh/id_ed25519
