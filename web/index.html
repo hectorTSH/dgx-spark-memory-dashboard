@@ -32,6 +32,7 @@ header{
 .status-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block;margin-right:6px}
 .status-dot.online{background:var(--acc3);box-shadow:0 0 6px var(--acc3)}
 .status-dot.error{background:var(--danger)}
+.status-dot.pending,.status-dot.stale{background:var(--acc4)}
 #refresh-btn,#units-btn{cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:6px;padding:5px 12px;font-size:12px;font-family:inherit;min-height:32px}
 #refresh-btn{margin-left:auto}
 #refresh-btn:hover,#units-btn:hover{border-color:var(--acc1);color:var(--acc1)}
@@ -101,6 +102,7 @@ main{
   border-radius:8px;padding:7px 10px;line-height:1.35;
 }
 #room-note strong{color:var(--acc3)}
+#sample-notice{display:none;grid-column:1 / -1;padding:8px 10px;border:1px solid var(--acc4);border-radius:6px;background:#33250b;color:#fcd34d;font-weight:600;overflow-wrap:anywhere}
 #canvas-wrap{flex:1 1 auto;position:relative;min-height:0;min-width:0;background:#0b0f16}
 canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 #gpu-strip{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:8px 14px;border-top:1px solid var(--border);background:#0a0d14}
@@ -180,6 +182,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
       <p style="color:var(--dim);font-size:12px;margin-top:6px">Then open <span id="proxy-url-hint">http://127.0.0.1:7474/</span></p>
     </div>
     <div id="capacity-head">
+      <div id="sample-notice" role="status" aria-live="polite"></div>
       <div>
         <div class="viz-label">detected active model</div>
         <div id="active-model-badge">undetected</div>
@@ -252,12 +255,16 @@ let headroomGiB = 2.0;
 let sparksMeta = [];
 let statesById = {};
 let activeId = null;
+let paintedId = null;
 let swapLogById = {};
 let lastHotById = {};
 let particles = [];
-let occupancy = { totalGiB:128, freeGiB:128, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
+let occupancy = { hasData:false, totalGiB:0, freeGiB:0, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
 
 function hms(){ return new Date().toTimeString().slice(0,8) }
+function escapeHtml(value){
+  return String(value ?? "").replace(/[&<>"']/g, ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[ch]);
+}
 function bytesToGiB(b){ return (b||0)/(1<<30) }
 function bytesToGB(b){ return (b||0)/1e9 }
 function fmtMem(bytes){
@@ -278,12 +285,46 @@ function setStatus(ok, msg){
   document.getElementById("status-text").textContent = msg;
 }
 function currentState(){ return activeId ? statesById[activeId] : null }
+const ENGINES = ["ollama","vllm","llamacpp","sglang"];
+function probeKnown(st, eng){
+  if(eng==="ollama") return !st.ollama_ps?.error && Array.isArray(st.ollama_ps?.models);
+  if(Array.isArray(st[eng])) return st[eng].length>0 && st[eng].every(p=>!p.models?.error && Array.isArray(p.models?.data));
+  return !st[eng+"_models"]?.error && Array.isArray(st[eng+"_models"]?.data);
+}
+function detectionNote(st){
+  const missing = ENGINES.filter(eng=>!probeKnown(st,eng));
+  return missing.length ? `Detection incomplete · probes unavailable: ${missing.join(", ")}. Undetected workloads may use memory.` : "";
+}
+function nodeHealth(st){
+  if(st?.stale && st.mem) return "stale";
+  if(st?.error) return "error";
+  if(!st || st.pending || !st.mem) return "pending";
+  return "online";
+}
+function successAge(st){
+  const stamp = st?.last_success_at ?? (nodeHealth(st)==="online" ? st?.fetched_at : null);
+  const ms = typeof stamp==="number" ? stamp*1000 : (stamp ? Date.parse(stamp) : NaN);
+  if(!Number.isFinite(ms)) return "last success unknown";
+  const seconds = Math.max(0, Math.floor((Date.now()-ms)/1000));
+  const age = seconds<60 ? `${seconds}s` : seconds<3600 ? `${Math.floor(seconds/60)}m ${seconds%60}s` : `${Math.floor(seconds/3600)}h ${Math.floor(seconds%3600/60)}m`;
+  return `last success ${age} ago`;
+}
+function updateFreshness(){
+  const st = currentState(), health = nodeHealth(st);
+  document.getElementById("last-updated").textContent = health==="pending" || !st?.mem ? "awaiting first sample" : successAge(st);
+  const notice = document.getElementById("sample-notice");
+  notice.style.display = health==="stale" ? "block" : "none";
+  notice.textContent = health==="stale" ? `STALE · ${successAge(st)} · showing last successful sample, not live${st.error?" · "+st.error:""}` : "";
+}
 
+let refreshInFlight = false;
 async function refresh(){
+  if(refreshInFlight) return;
+  refreshInFlight = true;
   try{
     const q = TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : "";
     const r = await fetch(`${API_BASE}/api/sparks${q}`, { headers: authHeaders(), signal: AbortSignal.timeout(60000) });
-    if(r.status===401){ setStatus(false,"unauthorized — set ?token="); document.getElementById("no-proxy").classList.add("show"); scheduleRefresh(true); return; }
+    if(r.status===401){ failStreak += 1; markDisconnected("server unauthorized — set ?token="); scheduleRefresh(true); return; }
     if(!r.ok) throw new Error("HTTP "+r.status);
     const data = await r.json();
     document.getElementById("no-proxy").classList.remove("show");
@@ -292,51 +333,54 @@ async function refresh(){
     if(data.units && !localStorage.getItem("dgx_smd_units")){ units = data.units; }
     document.getElementById("units-btn").textContent = units;
     sparksMeta = data.sparks || [];
-    const prev = {};
-    for(const st of Object.values(statesById)){
-      const id = st.spark_id;
-      prev[id] = {
-        ollama: new Set((st.ollama_ps?.models||[]).map(m=>m.name)),
-        engines: new Set([
-          ...((st.vllm_models?.data||[]).map(m=>m.id)),
-          ...((st.llamacpp_models?.data||[]).map(m=>m.id)),
-          ...((st.sglang_models?.data||[]).map(m=>m.id)),
-        ]),
-      };
-    }
+    const nextHot = {};
     statesById = {};
     for(const st of (data.states||[])){
       statesById[st.spark_id] = st;
       const id = st.spark_id;
-      const curO = new Set((st.ollama_ps?.models||[]).map(m=>m.name));
-      const curE = new Set([
-        ...((st.vllm_models?.data||[]).map(m=>m.id)),
-        ...((st.llamacpp_models?.data||[]).map(m=>m.id)),
-        ...((st.sglang_models?.data||[]).map(m=>m.id)),
-      ]);
-      const p = prev[id] || {ollama:new Set(), engines:new Set()};
-      for(const n of p.ollama) if(!curO.has(n)) logSwap(id,"out",n);
-      for(const n of curO) if(!p.ollama.has(n)) logSwap(id,"in",n);
-      for(const n of p.engines) if(!curE.has(n)) logSwap(id,"out",n);
-      for(const n of curE) if(!p.engines.has(n)) logSwap(id,"in",n);
+      if(nodeHealth(st)!=="online") continue;
+      nextHot[id] = {};
+      for(const eng of ENGINES){
+        if(!probeKnown(st,eng)) continue;
+        const models = eng==="ollama" ? st.ollama_ps.models : st[eng+"_models"]?.data || [];
+        const current = new Set(models.map(m=>m.name||m.id));
+        const previous = lastHotById[id]?.[eng];
+        nextHot[id][eng] = current;
+        if(!previous) continue; // First success (including recovery) is a baseline.
+        for(const name of previous) if(!current.has(name)) logSwap(id,"out",name);
+        for(const name of current) if(!previous.has(name)) logSwap(id,"in",name);
+      }
     }
-    if(!activeId || !statesById[activeId]){
-      activeId = sparksMeta[0]?.id || Object.keys(statesById)[0] || null;
+    lastHotById = nextHot;
+    const ids = sparksMeta.map(s=>s.id);
+    if(!ids.length) ids.push(...Object.keys(statesById));
+    if(!activeId || !ids.includes(activeId)){
+      activeId = [params.get("spark"), localStorage.getItem("dgx_smd_spark"), ...ids].find(id=>ids.includes(id)) || null;
     }
+    persistSelection();
     renderTabs();
     applyActive();
-    const label = sparksMeta.find(s=>s.id===activeId)?.label || activeId || "—";
-    const anyErr = (data.states||[]).some(s=>s.error);
-    setStatus(!anyErr, anyErr ? "partial · "+label : "online · "+label);
-    document.getElementById("last-updated").textContent = "updated "+hms();
     scheduleRefresh(false);
   }catch(e){
     failStreak += 1;
-    document.getElementById("no-proxy").classList.add("show");
-    setStatus(false, failStreak>1 ? `reconnecting… (${failStreak})` : "server offline");
-    // Keep last good occupancy painted — don't blank the map on a blip
+    markDisconnected(failStreak>1 ? `server reconnecting… (${failStreak})` : "server offline");
     scheduleRefresh(true);
+  }finally{
+    refreshInFlight = false;
   }
+}
+
+function markDisconnected(message){
+  lastHotById = {};
+  for(const [id, st] of Object.entries(statesById)){
+    const wasOnline = nodeHealth(st)==="online";
+    statesById[id] = {...st, pending:false, stale:!!st.mem && (wasOnline || !!st.stale), error:message,
+      last_success_at:st.last_success_at ?? (wasOnline ? st.fetched_at : null)};
+  }
+  document.getElementById("no-proxy").classList.add("show");
+  renderTabs();
+  applyActive();
+  if(!currentState()) setStatus(false,message);
 }
 
 let failStreak = 0;
@@ -360,6 +404,14 @@ window.addEventListener("online", ()=>kickRefresh());
 window.addEventListener("focus", ()=>kickRefresh());
 
 
+function persistSelection(){
+  if(!activeId) return;
+  localStorage.setItem("dgx_smd_spark", activeId);
+  const url = new URL(location.href);
+  url.searchParams.set("spark", activeId);
+  history.replaceState(null, "", url);
+}
+
 function renderTabs(){
   const el = document.getElementById("spark-tabs");
   if(!sparksMeta.length){
@@ -368,30 +420,35 @@ function renderTabs(){
   }
   el.innerHTML = sparksMeta.map(s=>{
     const st = statesById[s.id] || {};
-    const free = st.mem ? bytesToGiB(st.mem.available||st.mem.free||0).toFixed(0)+"G free" : (st.error?"error":"…");
-    const hot = ((st.ollama_ps?.models||[]).length + (st.vllm_models?.data||[]).length);
-    return `<button class="spark-tab ${s.id===activeId?"active":""}" data-id="${s.id}">
-      <span>${s.label||s.id}</span>
-      <span class="pill">${s.mode||"?"}</span>
-      <span class="mini">${free}${hot?` · ${hot} hot`:""}</span>
+    const health = nodeHealth(st);
+    const free = st.mem ? `${fmtMem(st.mem.available ?? st.mem.free ?? 0).slice(0,-1)} ${units} available / ${fmtMem(st.mem.total).slice(0,-1)} ${units} total` : "memory unavailable";
+    const hot = (st.ollama_ps?.models||[]).length + ["vllm","llamacpp","sglang"].reduce((n, eng)=>n+(st[eng+"_models"]?.data||[]).length, 0);
+    return `<button class="spark-tab ${s.id===activeId?"active":""}" data-id="${escapeHtml(s.id)}">
+      <span>${escapeHtml(s.label||s.id)}</span>
+      <span class="pill">${escapeHtml(s.mode||"?")}</span>
+      <span class="mini">${health}${health==="stale"?" · "+successAge(st):""} · ${escapeHtml(free)}${hot?` · ${hot} hot`:""}</span>
     </button>`;
   }).join("");
   el.querySelectorAll(".spark-tab").forEach(btn=>{
-    btn.onclick = ()=>{ activeId = btn.dataset.id; renderTabs(); applyActive(); };
+    btn.onclick = ()=>{ activeId = btn.dataset.id; persistSelection(); renderTabs(); applyActive(); };
   });
 }
 
 function applyActive(){
-  const st = currentState();
-  if(!st){
-    document.getElementById("room-note").textContent = "No spark selected.";
-    return;
+  if(paintedId!==activeId){
+    particles = [];
+    ctx.clearRect(0,0,W,H);
+    paintedId = activeId;
   }
-  if(st.error){
-    document.getElementById("room-note").textContent = "Error: "+st.error;
-    setEmptyLists(st.error);
-    occupancy = { totalGiB:128, freeGiB:0, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
-    syncBlocksFromOccupancy();
+  const st = currentState();
+  const health = nodeHealth(st);
+  const label = sparksMeta.find(s=>s.id===activeId)?.label || st?.spark_label || activeId || "—";
+  document.getElementById("product-badge").textContent = label + (st?.demo?" · demo":"");
+  setStatus(health==="online", health+" · "+label);
+  document.getElementById("status-dot").className = "status-dot "+health;
+  updateFreshness();
+  if(health==="pending" || health==="error" || !st?.mem){
+    clearActive(health==="pending" ? "Pending — waiting for first sample." : "Data unavailable: "+st.error);
     return;
   }
   computeOccupancy(st);
@@ -400,19 +457,34 @@ function applyActive(){
   updateActiveModel(st);
   syncBlocksFromOccupancy();
   renderSwapLog(activeId);
-  document.getElementById("product-badge").textContent = (st.spark_label||st.spark_id||"spark") + (st.demo?" · demo":"");
+}
+
+function clearActive(message){
+  for(const id of ["m-ram","m-disk","m-gpu","m-gpu-sub","m-count","vram-display","mem-used-label","mem-total-label","mem-pct","disk-used-label","disk-total-label","disk-pct","ollama-count","hf-count"]){
+    document.getElementById(id).textContent = "—";
+  }
+  for(const id of ["mem-bar","disk-bar"]) document.getElementById(id).style.width = "0%";
+  document.getElementById("active-model-badge").textContent = nodeHealth(currentState())==="pending" ? "Pending" : "Data unavailable";
+  document.getElementById("active-model-sub").textContent = "No current sample for this node.";
+  document.getElementById("room-note").textContent = message;
+  setEmptyLists(message);
+  occupancy = { hasData:false, totalGiB:0, freeGiB:0, usedGiB:0, systemGiB:0, modelGiB:0, models:[] };
+  particles = [];
+  BLOCKS.length = 0;
+  ctx.clearRect(0,0,W,H);
+  renderSwapLog(activeId);
 }
 
 function setEmptyLists(msg){
   ["list-hot","list-fit","list-ollama","list-hf","list-engines"].forEach(id=>{
-    document.getElementById(id).innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">${msg||"—"}</div>`;
+    document.getElementById(id).innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">${escapeHtml(msg||"—")}</div>`;
   });
 }
 
 function computeOccupancy(state){
   const mem = state.mem || {};
   const totalGiB = bytesToGiB(mem.total || (128*(1<<30)));
-  const availGiB = bytesToGiB(mem.available || mem.free || 0);
+  const availGiB = bytesToGiB(mem.available ?? mem.free ?? 0);
   const usedGiB = Math.max(0, totalGiB - availGiB);
   const models = [];
   for(const m of (state.ollama_ps?.models||[])){
@@ -431,7 +503,7 @@ function computeOccupancy(state){
   }
   const modelGiB = models.reduce((s,m)=>s+m.gib,0);
   const systemGiB = Math.max(0, usedGiB - modelGiB);
-  occupancy = { totalGiB, freeGiB:Math.max(0,availGiB), usedGiB, systemGiB, modelGiB, models };
+  occupancy = { hasData:true, totalGiB, freeGiB:Math.max(0,availGiB), usedGiB, systemGiB, modelGiB, models };
 }
 
 function estimateNameGiB(id, arch){
@@ -478,7 +550,7 @@ function renderSidebar(state){
     ...(state.sglang_models?.data||[]).map(m=>({...m, eng:"sglang"})),
   ];
   if(!ps.length && !engineHot.length){
-    hotEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">GPU/RAM empty — no models loaded</div>`;
+    hotEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No models detected · system/other ${fmtGiBnum(occupancy.systemGiB).slice(0,-1)} ${escapeHtml(units)}${detectionNote(state)?" · "+detectionNote(state):""}</div>`;
   } else {
     let html = ps.map(m=>{
       const t = tags.find(t=>t.name===m.name)||{};
@@ -494,13 +566,15 @@ function renderSidebar(state){
     hotEl.innerHTML = html;
   }
 
-  const candidates = catalogCandidates(state).filter(c=>!c.hot).sort((a,b)=>b.need-a.need);
+  const catalog = catalogCandidates(state);
+  const candidates = catalog.filter(c=>!c.hot).sort((a,b)=>b.need-a.need);
   const fits = candidates.filter(c=>c.need + headroomGiB <= freeGiB).slice(0,8);
   const almost = candidates.filter(c=>c.need + headroomGiB > freeGiB && c.need <= freeGiB + 8).slice(0,4);
   const hotModels = occupancy.models||[];
   const fitEl = document.getElementById("list-fit");
   if(!fits.length && !almost.length){
-    fitEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No catalogued model clearly fits in ${freeGiB.toFixed(1)} GiB free (with ${headroomGiB} GiB headroom).</div>`;
+    const note = !catalog.length ? "No catalogued models found on this node." : !candidates.length ? "All catalogued models already detected." : `No catalogued model clearly fits in ${freeGiB.toFixed(1)} GiB free (with ${headroomGiB} GiB headroom).`;
+    fitEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">${escapeHtml(note)}</div>`;
   } else {
     fitEl.innerHTML =
       fits.map(c=>{
@@ -529,7 +603,7 @@ function renderSidebar(state){
       else fit="nofit";
     }
     return rowHtml(t.name, mt, fmtMem(t.size||0), isHot, "ollama", fit);
-  }).join("") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No Ollama models</div>`;
+  }).join("") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">${state.ollama_tags?.error || !Array.isArray(state.ollama_tags?.models) ? "Ollama catalog unavailable" : "No Ollama models found"}</div>`;
 
   document.getElementById("hf-count").textContent = hf.length;
   document.getElementById("list-hf").innerHTML = hf.map(m=>{
@@ -553,7 +627,7 @@ function renderSidebar(state){
       engHtml += `<div class="model-row hot"><div><div class="model-name">${mt.label||m.id}</div>
         <div class="model-meta"><span class="tag tag-${eng==="vllm"?"vllm":eng==="llamacpp"?"llama":"sglang"}">${eng}</span>
         <span class="tag ${mt.arch==="MoE"?"tag-moe":"tag-dense"}">${mt.arch}</span>
-        <span style="color:var(--acc3)">● LIVE${kvNote}</span></div></div>
+        <span style="color:var(--acc3)">● ${state.stale?"LAST SAMPLE":"LIVE"}${kvNote}</span></div></div>
         <div class="model-size-col"><div class="disk-size">~${gib.toFixed(0)}G</div>
         <div style="font-size:10px">${m._size_source||"est"}</div></div></div>`;
     }
@@ -569,7 +643,7 @@ function renderSidebar(state){
       ${!running&&!restarting?'<span style="color:var(--danger)">✕ Stopped</span>':''}</div>
       <div style="font-size:10px;color:var(--dim);margin-top:2px">${d.status||""}${d.mem_usage?" · "+d.mem_usage:""}</div></div></div>`;
   });
-  document.getElementById("list-engines").innerHTML = engHtml || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No engines/containers detected</div>`;
+  document.getElementById("list-engines").innerHTML = engHtml + (detectionNote(state) ? `<div style="padding:12px 14px;color:var(--acc4);font-size:12px">${detectionNote(state)}</div>` : "") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No engines/containers detected</div>`;
 }
 
 function rowHtml(name, mt, size, isHot, source, fitClass="", fitNote=""){
@@ -595,7 +669,7 @@ function renderMeters(state){
   const mem = state.mem || {};
   const disk = state.disk || {};
   const gpu = state.gpu || {};
-  const memUsed = (mem.total||0) - (mem.available||mem.free||0);
+  const memUsed = (mem.total||0) - (mem.available ?? mem.free ?? 0);
   const memPct = mem.total ? (memUsed/mem.total*100) : 0;
   document.getElementById("mem-bar").style.width = memPct+"%";
   document.getElementById("mem-used-label").textContent = fmtMem(memUsed);
@@ -617,11 +691,13 @@ function renderMeters(state){
   document.getElementById("vram-display").textContent = fmtGiBnum(occupancy.freeGiB)+" free";
   document.getElementById("m-ram").textContent = fmtGiBnum(occupancy.usedGiB);
   document.getElementById("m-disk").textContent = ((disk.used||0)/1e12).toFixed(2)+"T";
-  const fitCount = catalogCandidates(state).filter(c=>!c.hot && c.need + headroomGiB <= occupancy.freeGiB).length;
+  const catalog = catalogCandidates(state);
+  const fitCount = catalog.filter(c=>!c.hot && c.need + headroomGiB <= occupancy.freeGiB).length;
+  const catalogNote = !catalog.length ? "No catalogued models found" : `${fitCount} catalogued model${fitCount===1?"":"s"} fit with ${headroomGiB} GiB headroom`;
   document.getElementById("room-note").innerHTML =
     occupancy.models.length===0
-      ? `<strong>${occupancy.freeGiB.toFixed(1)} GiB free</strong> · GPU empty · ${fitCount} catalogued model${fitCount===1?"":"s"} fit with ${headroomGiB}G headroom · weights ${occupancy.modelGiB.toFixed(1)}G · other ${occupancy.systemGiB.toFixed(1)}G`
-      : `<strong>${occupancy.freeGiB.toFixed(1)} GiB free</strong> · weights ${occupancy.modelGiB.toFixed(1)}G · system/other ${occupancy.systemGiB.toFixed(1)}G · ${fitCount} more can fit`;
+      ? `<strong>${fmtGiBnum(occupancy.freeGiB).slice(0,-1)} ${escapeHtml(units)} available</strong> · No models detected · system/other ${fmtGiBnum(occupancy.systemGiB).slice(0,-1)} ${escapeHtml(units)} · ${escapeHtml(catalogNote)}`
+      : `<strong>${occupancy.freeGiB.toFixed(1)} GiB free</strong> · weights ${occupancy.modelGiB.toFixed(1)}G · system/other ${occupancy.systemGiB.toFixed(1)}G · ${escapeHtml(catalogNote)}`;
 }
 
 function updateActiveModel(state){
@@ -654,9 +730,10 @@ function updateActiveModel(state){
     badge.textContent = "active";
     sub.textContent = `GPU load detected${gpuSummary} · model source undetected`;
   } else {
-    badge.textContent = "empty";
-    sub.textContent = `no hot models${gpuSummary}`;
+    badge.textContent = "No models detected";
+    sub.textContent = `Measured system/other ${fmtGiBnum(occupancy.systemGiB).slice(0,-1)} ${units}${gpuSummary}`;
   }
+  if(detectionNote(state)) sub.textContent += " · "+detectionNote(state);
 }
 
 function logSwap(id, dir, name){
@@ -716,6 +793,7 @@ class Particle{
 }
 function gibPerBlock(){ return (occupancy.totalGiB||128)/Math.max(1,BLOCKS.length); }
 function syncBlocksFromOccupancy(){
+  if(!occupancy.hasData){ BLOCKS.length=0; return; }
   if(!BLOCKS.length) blockGrid();
   const gpb=gibPerBlock(), n=BLOCKS.length;
   const fills=[];
@@ -746,6 +824,7 @@ function syncBlocksFromOccupancy(){
 function drawFrame(){
   if(W<2||H<2){ requestAnimationFrame(drawFrame); return; }
   ctx.clearRect(0,0,W,H); ctx.fillStyle="#0b0f16"; ctx.fillRect(0,0,W,H);
+  if(!occupancy.hasData){ requestAnimationFrame(drawFrame); return; }
   if(!BLOCKS.length) blockGrid();
   BLOCKS.forEach(b=>{
     b.alpha += (b.targetAlpha-b.alpha)*0.18;
@@ -767,7 +846,7 @@ function drawFrame(){
     ctx.fillRect(tx,ty,tw,th); ctx.fillStyle="#94a3b8";
     ctx.font="600 13px -apple-system, BlinkMacSystemFont, sans-serif";
     ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.fillText("memory empty — outlined blocks are free capacity", W/2, H/2);
+    ctx.fillText("No models detected · outlined blocks are available", W/2, H/2);
     ctx.restore();
   }
   for(let i=particles.length-1;i>=0;i--){ particles[i].tick(); particles[i].draw(ctx); if(particles[i].life<=0) particles.splice(i,1); }
@@ -778,9 +857,12 @@ document.getElementById("units-btn").onclick = ()=>{
   units = units==="GiB" ? "GB" : "GiB";
   localStorage.setItem("dgx_smd_units", units);
   document.getElementById("units-btn").textContent = units;
+  renderTabs();
   applyActive();
 };
 requestAnimationFrame(()=>resize());
+function freshnessTick(){ updateFreshness(); renderTabs(); setTimeout(freshnessTick,1000); }
+setTimeout(freshnessTick,1000);
 resize(); drawFrame(); kickRefresh();
 
 </script>

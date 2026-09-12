@@ -124,6 +124,18 @@ export DGX_SMD_SPARKS="spark-1|lab-a|remote|user@100.1.1.1:22|~/.ssh/id_ed25519;
 python3 scripts/run.py --host 127.0.0.1
 ```
 
+### Adding a second Spark
+
+1. Add another entry under `sparks:` in your **local, gitignored** `config.yaml` (see the commented second node in the example). Give every node a unique `id`.
+2. Verify SSH to each node with its configured `user` and `ssh_key`. Different Sparks can use different keys; access to the first does not prove access to the second.
+3. Restart the dashboard service to load the updated configuration. Nothing needs to be installed or loaded on an idle Spark beyond SSH and Python 3.
+
+Each tab shows that node's **available / total memory**, health, and detected hot-model count. Click a tab for its memory map. The selected node is remembered in your browser, and `/?spark=spark-2` opens a specific configured node directly.
+
+Nodes are polled independently: a slow or offline Spark does not block updates from healthy nodes. Before a node's first sample, it is marked as connecting. A failed node retains its own last successful sample with a **stale** warning; unavailable readings are not presented as zero or borrowed from another node.
+
+These are separate memory pools, not a combined model-loading budget. On a fresh Spark, **no models detected** does not mean zero RAM usage: Linux, desktop applications, and background services still consume system/other memory. Missing engine probes do not prove that no unmonitored workload exists.
+
 ## macOS menu bar
 
 ```bash
@@ -149,6 +161,17 @@ Units default to **GiB**; the UI can toggle GiB/GB.
 - No model launch / unload / docker start-stop controls (see Spark Studio, DGX-Model-Manager)
 - Not a full Prometheus/Grafana stack (see spark-dashboard, sparkDash)
 - Not a substitute for `spark-doctor` diagnostics
+
+## Development checks
+
+No test dependencies are required beyond Python and Node.js:
+
+```bash
+python3 -m unittest discover -s tests -v
+node --test tests/test_web.js
+```
+
+The tests cover per-node polling and failure isolation, cache sharing and recovery, tab selection, units, and empty/stale/error display. For hardware validation, check `/api/sparks` and both per-node endpoints, then switch between the real nodes in a browser. `--demo` is useful for UI development but is not evidence of SSH or hardware connectivity.
 
 ## Related projects
 

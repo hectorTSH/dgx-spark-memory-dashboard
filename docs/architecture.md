@@ -34,6 +34,8 @@ Server enrichment adds: `spark_id`, `spark_label`, `mode`, `vllm_models`, `*_siz
 ## Design choices
 
 - **Stdlib-first server** so a Spark or laptop can run it with stock Python 3.9+.
-- **One SSH round-trip** per spark per poll (batched remote script), cached ~`poll_seconds`.
+- **One SSH round-trip** per Spark per poll (batched remote script), with a separate background polling loop for each node. Requests reuse the cached snapshot; concurrent refreshes share one in-flight collection per node.
+- **Explicit freshness** — initial snapshots use `pending: true`; successful samples record `last_success_at`; failures carry `error` and preserve that node's last good payload with `stale: true` when one exists. Clients must not treat stale model inventories as load/unload events.
+- **Read-only cached API by default** — background polling begins at startup. `?force=1` waits for collection (all-node requests collect in parallel). `--no-background-poll` keeps request-driven collection for scripts and debugging.
 - **UI has no framework** — copy `web/index.html` or open through the server.
 - **Read-only** — inventory and fit advice only; no process control surface.
