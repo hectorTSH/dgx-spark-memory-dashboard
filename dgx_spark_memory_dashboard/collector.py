@@ -170,6 +170,94 @@ if hf_root.is_dir():
         })
 out["hf_models"] = hf
 
+# Read-only policy controller status (e.g. spark-88de :11434/_policy/status).
+# Plain Ollama answers 404 here, which is recorded as None. GET only.
+_pol = get_json(ollama.rstrip("/") + "/_policy/status", 4)
+out["policy_status"] = _pol if isinstance(_pol, dict) and "error" not in _pol else None
+
+# GPU compute processes (read-only attribution so models are not hidden in system/other)
+gpu_procs = []
+try:
+    r = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=5,
+    )
+    for line in r.stdout.strip().splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+        except Exception:
+            continue
+        try:
+            used_mib = float(parts[2])
+        except Exception:
+            used_mib = None
+        cmd, cwd, rss = "", None, None
+        try:
+            cmd = Path("/proc/%d/cmdline" % pid).read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        except Exception:
+            pass
+        try:
+            cwd = os.readlink("/proc/%d/cwd" % pid)
+        except Exception:
+            pass
+        try:
+            for ln in Path("/proc/%d/status" % pid).read_text().splitlines():
+                if ln.startswith("VmRSS:"):
+                    rss = int(ln.split()[1]) * 1024
+        except Exception:
+            pass
+        gpu_procs.append({"pid": pid, "process_name": parts[1], "used_mib": used_mib,
+                          "cmdline": cmd[:600], "cwd": cwd, "rss_bytes": rss})
+except Exception as e:
+    out["gpu_procs_error"] = str(e)
+out["gpu_procs"] = gpu_procs
+
+# Local (non-HF-cache) model directories, re-scanned every poll: diffusers /
+# transformers checkpoints such as ~/qwen-image21-inference/models/Qwen-Image-2.1
+import glob as _glob
+WEIGHT_EXT = (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".onnx")
+local_models, _seen = [], set()
+for pat in (PROBES.get("model_dirs") or ["~/*/models/*", "~/models/*"]):
+    for d in sorted(_glob.glob(os.path.expanduser(pat))):
+        try:
+            rp = os.path.realpath(d)
+            if rp in _seen or not os.path.isdir(d):
+                continue
+            markers = [m for m in ("model_index.json", "config.json") if os.path.isfile(os.path.join(d, m))]
+            if not markers:
+                continue
+            size, nweights, incomplete = 0, 0, 0
+            for root, dirs, files in os.walk(d):
+                dirs[:] = [x for x in dirs if not x.startswith(".")]
+                for f in files:
+                    try:
+                        size += os.path.getsize(os.path.join(root, f))
+                    except Exception:
+                        pass
+                    if f.endswith(WEIGHT_EXT):
+                        nweights += 1
+                    if f.endswith(".incomplete") or f.endswith(".part"):
+                        incomplete += 1
+            if not nweights:
+                continue
+            _seen.add(rp)
+            local_models.append({
+                "name": os.path.basename(d.rstrip("/")),
+                "size_bytes": size,
+                "size_gb": round(size / 1e9, 2),
+                "size_gib": round(size / (1 << 30), 2),
+                "source": "local",
+                "kind": "diffusers" if "model_index.json" in markers else "transformers",
+                "incomplete": incomplete,
+                "path": d,
+            })
+        except Exception:
+            continue
+out["local_models"] = local_models
+
 # hostname
 try:
     out["hostname"] = Path("/etc/hostname").read_text().strip()
@@ -539,6 +627,122 @@ def attach_vllm_sizes(state: Dict[str, Any]) -> None:
             m["_size_source"] = "name_estimate"
 
 
+_GENERIC_DIRS = {"policy", "src", "scripts", "bin", "app", "lib", "server", "worker", "share"}
+
+
+def _proc_label(cmdline: str, process_name: str) -> str:
+    """Human label for an unattributed GPU process, e.g. 'cua-s1'."""
+    for tok in (cmdline or "").split():
+        if tok.endswith(".py") and "/" in tok:
+            parts = [x for x in tok.split("/") if x][:-1]
+            while parts and (parts[-1] in _GENERIC_DIRS or parts[-1].startswith(".")):
+                parts.pop()
+            if parts:
+                return parts[-1]
+    return os.path.basename((process_name or "").strip()) or "gpu process"
+
+
+def attribute_gpu_processes(data: Dict[str, Any]) -> None:
+    """Turn nvidia-smi compute processes + policy status + local model dirs into
+    'resident_models' so non-Ollama models (image workers, custom servers) show
+    as loaded instead of disappearing into system/other. Read-only."""
+    import re
+
+    procs = data.get("gpu_procs") or []
+    local = data.get("local_models") or []
+    policy = data.get("policy_status") if isinstance(data.get("policy_status"), dict) else {}
+    image = policy.get("image") if isinstance(policy.get("image"), dict) else None
+    engines_reporting = {
+        eng: bool((data.get(eng + "_models") or {}).get("data")) for eng in ("vllm", "llamacpp", "sglang")
+    }
+    resident: List[Dict[str, Any]] = []
+    for p in procs:
+        hay = "%s %s" % (p.get("process_name") or "", p.get("cmdline") or "")
+        if re.search(r"ollama", hay, re.I):
+            continue  # Ollama runners are already counted via /api/ps
+        if engines_reporting["vllm"] and re.search(r"vllm", hay, re.I):
+            continue
+        if engines_reporting["sglang"] and re.search(r"sglang", hay, re.I):
+            continue
+        if engines_reporting["llamacpp"] and re.search(r"llama-server|llama\.cpp", hay, re.I):
+            continue
+        used_mib = p.get("used_mib")
+        if used_mib:
+            gib, src = used_mib / 1024.0, "nvidia-smi"
+        elif p.get("rss_bytes"):
+            gib, src = p["rss_bytes"] / float(1 << 30), "rss"
+        else:
+            gib, src = 0.0, "unknown"
+        # Match to a local model directory sharing the same project root
+        match = None
+        locs = [p.get("cmdline") or "", p.get("cwd") or ""]
+        cands = []
+        for lm in local:
+            path = (lm.get("path") or "").rstrip("/")
+            root = os.path.dirname(os.path.dirname(path)) if "/models/" in path else os.path.dirname(path)
+            if root.count("/") < 3:  # don't match on bare home dir
+                continue
+            if any(root + "/" in x or x == root for x in locs):
+                cands.append(lm)
+        if cands:
+            named = [c for c in cands if c.get("name") and c["name"].lower() in locs[0].lower()]
+            match = (named or cands)[0]
+        item: Dict[str, Any] = {
+            "name": match["name"] if match else _proc_label(p.get("cmdline") or "", p.get("process_name") or ""),
+            "pid": p.get("pid"),
+            "gib": round(gib, 2),
+            "size_source": src,
+            "process": p.get("process_name"),
+            "kind": (match or {}).get("kind") or "gpu-process",
+            "matched_model": bool(match),
+            "local_path": (match or {}).get("path"),
+            "on_disk_gib": (match or {}).get("size_gib"),
+            "pinned": False,
+            "state": "loaded",
+        }
+        if image and image.get("pid") == p.get("pid"):
+            rb = image.get("readback") if isinstance(image.get("readback"), dict) else {}
+            item["kind"] = "image-worker"
+            item["pinned"] = bool(image.get("resident"))
+            item["state"] = (
+                "rendering" if image.get("render_active")
+                else "resident" if image.get("resident")
+                else "warming" if image.get("warming")
+                else "loaded"
+            )
+            item["policy"] = {
+                "resident": image.get("resident"),
+                "warming": image.get("warming"),
+                "render_active": image.get("render_active"),
+                "reserved_gib": round((rb.get("reserved_bytes") or 0) / float(1 << 30), 2) or None,
+                "load_seconds": rb.get("load_seconds"),
+                "error_type": image.get("error_type"),
+            }
+        if match:
+            match["_loaded"] = True
+        resident.append(item)
+    data["resident_models"] = resident
+    # Image worker status even when it is not on the GPU (e.g. evicted for an exclusive task)
+    if image is not None:
+        on_gpu = any(r.get("kind") == "image-worker" for r in resident)
+        data["image_worker"] = {
+            "resident": image.get("resident"),
+            "warming": image.get("warming"),
+            "render_active": image.get("render_active"),
+            "pid": image.get("pid"),
+            "on_gpu": on_gpu,
+            "policy": policy.get("policy"),
+        }
+    # Local model dirs join the on-SSD catalog (UI 'HF / other' list)
+    if local:
+        hf = list(data.get("hf_models") or [])
+        known = {h.get("path") for h in hf}
+        for lm in local:
+            if lm.get("path") not in known:
+                hf.append(lm)
+        data["hf_models"] = hf
+
+
 def enrich_state(data: Dict[str, Any], spark: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(data or {})
     data["spark_id"] = spark.get("id")
@@ -550,6 +754,7 @@ def enrich_state(data: Dict[str, Any], spark: Dict[str, Any]) -> Dict[str, Any]:
         data["vllm"] = [{"url": "http://127.0.0.1:8000", "models": data.get("vllm_models"), "metrics_text": None}]
     flatten_engine_models(data)
     attach_vllm_sizes(data)
+    attribute_gpu_processes(data)
     data["fetched_at"] = time.time()
     return data
 

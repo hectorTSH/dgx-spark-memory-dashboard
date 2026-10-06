@@ -205,7 +205,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
       <div class="meter"><div class="meter-title">RAM used</div><div class="meter-val" id="m-ram">—</div><div class="meter-sub">of unified memory</div></div>
       <div class="meter"><div class="meter-title">SSD used</div><div class="meter-val" id="m-disk">—</div><div class="meter-sub">of NVMe</div></div>
       <div class="meter"><div class="meter-title">GPU util</div><div class="meter-val" id="m-gpu">—</div><div class="meter-sub" id="m-gpu-sub">temp / power</div></div>
-      <div class="meter"><div class="meter-title">models on SSD</div><div class="meter-val" id="m-count">—</div><div class="meter-sub">ollama + hf</div></div>
+      <div class="meter"><div class="meter-title">models on SSD</div><div class="meter-val" id="m-count">—</div><div class="meter-sub">ollama + hf/local</div></div>
     </div>
     <div id="swap-log"><div class="swap-entry"><span class="ts">--:--:--</span><span class="ev-neutral">waiting for first poll…</span></div></div>
   </div>
@@ -242,6 +242,18 @@ function modelMeta(name, details){
   const nm = MODEL_META.names[name] || {};
   const fam = MODEL_META.families[(details||{}).family] || {};
   return { arch: nm.arch || fam.arch || "Dense", active: nm.active || fam.active || null, label: nm.label || name };
+}
+// Non-Ollama models found via GPU process attribution (image workers, custom servers).
+function residentModels(st){ return Array.isArray(st?.resident_models) ? st.resident_models : []; }
+function residentHot(st){ return residentModels(st).filter(r=>r.matched_model || r.kind==="image-worker" || (r.gib||0)>=1); }
+function residentNote(r){
+  const bits = [];
+  if(r.kind==="image-worker") bits.push(r.pinned ? "pinned by policy controller" : (r.state||"loaded"));
+  else if(r.state) bits.push(r.state);
+  if(r.pid) bits.push("pid "+r.pid);
+  if(r.on_disk_gib) bits.push(Number(r.on_disk_gib).toFixed(1)+"G on SSD");
+  if(r.policy?.reserved_gib) bits.push("CUDA reserved "+Number(r.policy.reserved_gib).toFixed(1)+"G");
+  return bits.join(" · ");
 }
 const params = new URLSearchParams(location.search);
 const API_BASE = (params.get("api") || (location.protocol.startsWith("http") ? location.origin : "http://127.0.0.1:7474")).replace(/\/$/,"");
@@ -288,7 +300,8 @@ function currentState(){ return activeId ? statesById[activeId] : null }
 const ENGINES = ["ollama","vllm","llamacpp","sglang"];
 function probeKnown(st, eng){
   if(eng==="ollama") return !st.ollama_ps?.error && Array.isArray(st.ollama_ps?.models);
-  if(Array.isArray(st[eng])) return st[eng].length>0 && st[eng].every(p=>!p.models?.error && Array.isArray(p.models?.data));
+  const notRunning = p=>/refused|Errno 111/i.test(String(p.models?.error||""));
+  if(Array.isArray(st[eng])) return st[eng].length>0 && st[eng].every(p=>notRunning(p) || (!p.models?.error && Array.isArray(p.models?.data)));
   return !st[eng+"_models"]?.error && Array.isArray(st[eng+"_models"]?.data);
 }
 function detectionNote(st){
@@ -347,6 +360,18 @@ async function refresh(){
         const previous = lastHotById[id]?.[eng];
         nextHot[id][eng] = current;
         if(!previous) continue; // First success (including recovery) is a baseline.
+        for(const name of previous) if(!current.has(name)) logSwap(id,"out",name);
+        for(const name of current) if(!previous.has(name)) logSwap(id,"in",name);
+      }
+    }
+    for(const st of (data.states||[])){
+      const id = st.spark_id;
+      if(nodeHealth(st)!=="online" || !Array.isArray(st.resident_models)) continue;
+      const current = new Set(residentHot(st).map(r=>r.name));
+      const previous = lastHotById[id]?.gpu;
+      nextHot[id] = nextHot[id] || {};
+      nextHot[id].gpu = current;
+      if(previous){
         for(const name of previous) if(!current.has(name)) logSwap(id,"out",name);
         for(const name of current) if(!previous.has(name)) logSwap(id,"in",name);
       }
@@ -422,7 +447,7 @@ function renderTabs(){
     const st = statesById[s.id] || {};
     const health = nodeHealth(st);
     const free = st.mem ? `${fmtMem(st.mem.available ?? st.mem.free ?? 0).slice(0,-1)} ${units} available / ${fmtMem(st.mem.total).slice(0,-1)} ${units} total` : "memory unavailable";
-    const hot = (st.ollama_ps?.models||[]).length + ["vllm","llamacpp","sglang"].reduce((n, eng)=>n+(st[eng+"_models"]?.data||[]).length, 0);
+    const hot = (st.ollama_ps?.models||[]).length + ["vllm","llamacpp","sglang"].reduce((n, eng)=>n+(st[eng+"_models"]?.data||[]).length, 0) + residentHot(st).length;
     return `<button class="spark-tab ${s.id===activeId?"active":""}" data-id="${escapeHtml(s.id)}">
       <span>${escapeHtml(s.label||s.id)}</span>
       <span class="pill">${escapeHtml(s.mode||"?")}</span>
@@ -501,6 +526,11 @@ function computeOccupancy(state){
       models.push({name:m.id||m.name, label:mt.label||m.id, arch:mt.arch, gib, source:eng, size_source:m._size_source});
     }
   }
+  for(const r of residentModels(state)){
+    if(!(r.gib>0)) continue;
+    const mt = modelMeta(r.name,{});
+    models.push({name:r.name, label:mt.label, arch:mt.arch, gib:r.gib, source:"gpu", size_source:r.size_source});
+  }
   const modelGiB = models.reduce((s,m)=>s+m.gib,0);
   const systemGiB = Math.max(0, usedGiB - modelGiB);
   occupancy = { hasData:true, totalGiB, freeGiB:Math.max(0,availGiB), usedGiB, systemGiB, modelGiB, models };
@@ -522,6 +552,7 @@ function catalogCandidates(state){
   for(const eng of ["vllm","llamacpp","sglang"]){
     for(const m of (state[eng+"_models"]?.data||[])) hot.add(m.id||m.name);
   }
+  for(const r of residentModels(state)) hot.add(r.name);
   const out = [];
   for(const t of (state.ollama_tags?.models||[])){
     const mt = modelMeta(t.name, t.details||{});
@@ -530,7 +561,7 @@ function catalogCandidates(state){
   for(const h of (state.hf_models||[])){
     const mt = modelMeta(h.name,{});
     const need = h.size_gib != null ? h.size_gib : (h.size_bytes?bytesToGiB(h.size_bytes): (h.size_gb||0)*(1e9/(1<<30)));
-    out.push({name:h.name, mt, need, hot:hot.has(h.name), source:"hf"});
+    out.push({name:h.name, mt, need, hot:hot.has(h.name)||!!h._loaded, source:h.source==="local"?"local":"hf"});
   }
   return out;
 }
@@ -549,7 +580,8 @@ function renderSidebar(state){
     ...(state.llamacpp_models?.data||[]).map(m=>({...m, eng:"llamacpp"})),
     ...(state.sglang_models?.data||[]).map(m=>({...m, eng:"sglang"})),
   ];
-  if(!ps.length && !engineHot.length){
+  const gpuHot = residentHot(state);
+  if(!ps.length && !engineHot.length && !gpuHot.length){
     hotEl.innerHTML = `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No models detected · system/other ${fmtGiBnum(occupancy.systemGiB).slice(0,-1)} ${escapeHtml(units)}${detectionNote(state)?" · "+detectionNote(state):""}</div>`;
   } else {
     let html = ps.map(m=>{
@@ -562,6 +594,10 @@ function renderSidebar(state){
       const gib = m._size_gib || estimateNameGiB(m.id||"", mt.arch);
       const srcNote = m._size_source==="docker_stats" ? "docker" : "est";
       html += rowHtml(m.id||m.name, mt, `~${gib.toFixed(0)}G (${srcNote})`, true, m.eng);
+    }
+    for(const r of gpuHot){
+      const mt = modelMeta(r.name,{});
+      html += rowHtml(r.name, mt, fmtMem((r.gib||0)*(1<<30)), true, "gpu", "", escapeHtml(residentNote(r)));
     }
     hotEl.innerHTML = html;
   }
@@ -614,8 +650,9 @@ function renderSidebar(state){
     else if(need <= freeGiB + 8) fit="tight";
     else fit="nofit";
     const inc = m.incomplete ? ` · ${m.incomplete} incomplete` : "";
-    return rowHtml(m.name, mt, (m.size_gib!=null?m.size_gib:need).toFixed(1)+"G"+inc, false, "hf", fit);
-  }).join("") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No HF models found</div>`;
+    const loaded = !!m._loaded || residentModels(state).some(r=>r.name===m.name);
+    return rowHtml(m.name, mt, (m.size_gib!=null?m.size_gib:need).toFixed(1)+"G"+inc, loaded, m.source==="local"?"local":"hf", loaded?"":fit, m.kind?escapeHtml(m.kind):"");
+  }).join("") || `<div style="padding:12px 14px;color:var(--dim);font-size:12px">No HF / local models found</div>`;
 
   let engHtml = "";
   for(const eng of ["vllm","llamacpp","sglang"]){
@@ -631,6 +668,20 @@ function renderSidebar(state){
         <div class="model-size-col"><div class="disk-size">~${gib.toFixed(0)}G</div>
         <div style="font-size:10px">${m._size_source||"est"}</div></div></div>`;
     }
+  }
+  for(const r of residentModels(state)){
+    engHtml += `<div class="model-row hot"><div><div class="model-name">⚙︎ ${escapeHtml(r.name)}</div>
+      <div class="model-meta"><span class="tag tag-vllm">GPU process</span>${r.pinned?'<span class="tag tag-hot">pinned</span>':''}
+      <span style="color:var(--acc3)">● ${escapeHtml(r.state||"loaded")}</span></div>
+      <div style="font-size:10px;color:var(--dim);margin-top:2px">${escapeHtml(residentNote(r))}</div></div>
+      <div class="model-size-col"><div class="disk-size">${(r.gib||0).toFixed(1)}G</div><div style="font-size:10px">${escapeHtml(r.size_source||"")}</div></div></div>`;
+  }
+  if(state.image_worker && !state.image_worker.on_gpu){
+    const iw = state.image_worker;
+    const why = iw.warming ? "warming" : iw.resident ? "resident (no GPU process seen)" : "not resident — released by policy";
+    engHtml += `<div class="model-row"><div><div class="model-name">🖼 image worker</div>
+      <div class="model-meta"><span class="tag tag-vllm">policy</span><span style="color:var(--acc4)">${escapeHtml(why)}</span></div>
+      <div style="font-size:10px;color:var(--dim);margin-top:2px">${escapeHtml(iw.policy||"")}</div></div></div>`;
   }
   docker.forEach(d=>{
     const running = (d.status||"").toLowerCase().includes("up");
@@ -654,6 +705,8 @@ function rowHtml(name, mt, size, isHot, source, fitClass="", fitNote=""){
     : source==="vllm" ? `<span class="tag tag-vllm">vLLM</span>`
     : source==="llamacpp" ? `<span class="tag tag-llama">llama.cpp</span>`
     : source==="sglang" ? `<span class="tag tag-sglang">SGLang</span>`
+    : source==="gpu" ? `<span class="tag tag-vllm">GPU</span>`
+    : source==="local" ? `<span class="tag tag-hf">Local</span>`
     : `<span class="tag tag-hf">🤗 HF</span>`;
   const hotTag = isHot ? `<span class="tag tag-hot">● RAM</span>` : "";
   const fitTag = fitClass==="fits" ? `<span class="tag tag-fit">fits</span>`
@@ -718,14 +771,19 @@ function updateActiveModel(state){
       const mt=modelMeta(m.name,t.details||m.details||{});
       return `${mt.label} (${fmtMem(m.size||0)})`;
     });
+    const extra = residentHot(state).map(r=>`${modelMeta(r.name,{}).label} (${fmtMem((r.gib||0)*(1<<30))})`);
     badge.textContent = labels[0];
-    sub.textContent = `Ollama · ${labels.join(" + ")}${gpuSummary}`;
+    sub.textContent = `Ollama · ${labels.join(" + ")}${extra.length?" · GPU · "+extra.join(" + "):""}${gpuSummary}`;
   } else if(engines.length){
     const m = engines[0];
     const mt = modelMeta(m.id||m.name,{});
     const gib = m._size_gib || estimateNameGiB(m.id||"", mt.arch);
     badge.textContent = mt.label || m.id;
     sub.textContent = `${m.eng} · ${mt.arch} · ~${gib.toFixed(0)}G (${m._size_source||"est"})${gpuSummary}`;
+  } else if(residentHot(state).length){
+    const rs = residentHot(state);
+    badge.textContent = modelMeta(rs[0].name,{}).label;
+    sub.textContent = `GPU · ${rs.map(r=>`${modelMeta(r.name,{}).label} (${fmtMem((r.gib||0)*(1<<30))}${r.pinned?", pinned":""})`).join(" + ")}${gpuSummary}`;
   } else if(typeof gpu.utilization_gpu==="number" && gpu.utilization_gpu>=10){
     badge.textContent = "active";
     sub.textContent = `GPU load detected${gpuSummary} · model source undetected`;
